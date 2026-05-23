@@ -1,0 +1,26 @@
+app:
+  demo_mode: true          # true = 跳過爬虫，強制使用 Mock 數據 (MVP)
+  debug: true
+
+llm:
+  model: "deepseek-ai/DeepSeek-V3-0324"
+  max_tokens: 2000
+  max_concurrent_calls: 5   # asyncio.Semaphore 上限
+
+scraper:
+  request_delay_seconds: [2, 5]   # 隨機延遲範圍
+  rotate_user_agents: true
+  max_concurrent_requests: 2
+  timeout_seconds: 15
+  retry_on_timeout: 2
+
+search:
+  budget_tolerance: 0.10          # ±10%
+  batch_size: 5                   # 每批返回條數
+  max_raw_results: 50             # 爬虫目標原始數量
+  max_expansion_level: 3
+
+session:
+  fc_trigger_max_attempts: 2
+  rejection_continuity_window_seconds: 5.0
+

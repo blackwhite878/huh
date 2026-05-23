@@ -1,0 +1,131 @@
+// ============================================================================
+// Type contracts — must stay in sync with Backend.md & Frontend.md
+// ============================================================================
+
+export type AppState =
+  | "IDLE"
+  | "SEMANTIC_ALIGNING"
+  | "PROFILING_COMPLETE"
+  | "CHATTING"
+  | "PENDING_CONFIRMATION"
+  | "SEARCHING"
+  | "BATCH_1_DISPLAY"
+  | "BATCH_2_DISPLAY"
+  | "ALL_REJECTED"
+  | "ACTION_REQUIRED_UI"
+  | "TIER3_NO_RESULT"
+  | "ERROR_DEGRADED_OVERLAY";
+
+export type AgentStyle = "professional" | "friendly" | "active";
+export type Identity = "first_time_buyer" | "investor" | "upgrader";
+export type Gender = "female" | "male" | "prefer_not_to_say";
+export type SearchStage =
+  | "scraping"
+  | "ranking"
+  | "generating_remarks"
+  | "complete";
+
+export interface Phase1Form {
+  budget: number;
+  agent_style: AgentStyle;
+  target: string;
+  identity: Identity;
+  gender: Gender;
+  description: string; // Added description field
+}
+
+export interface DialogueMessage {
+  role: "user" | "agent" | "system";
+  content: string;
+  timestamp?: number;
+}
+
+export interface PendingConflict {
+  conflicting_field: string;
+  proposed_value: unknown;
+  reply: string;
+}
+
+export interface PropertyResult {
+  property_id: string;
+  title: string;
+  price: number;
+  location: string;
+  feature_tags: string[];
+  tier: "tier_1" | "tier_2";
+  ai_remarks?: string;
+  missing_features?: string[];
+  remedy?: string;
+  image_url?: string;
+  url?: string;
+}
+
+export interface InitSessionResponse {
+  session_id: string;
+  status: "aligning";
+}
+
+export interface SessionReadyResponse {
+  status: "aligning" | "ready";
+  semantic_tags?: string[];
+  alignment_warning?: boolean;
+}
+
+export interface ChatResponse {
+  status: "chatting" | "pending_confirmation" | "searching";
+  reply: string;
+  fc_attempt?: number;
+  conflicting_field?: string;
+  proposed_value?: unknown;
+}
+
+export interface SearchStatusResponse {
+  status: SearchStage;
+  batch_index?: number;
+  total_available?: number;
+  has_more?: boolean;
+  tier3_triggered?: boolean;
+  degraded?: boolean;
+  results?: PropertyResult[];
+}
+
+export interface RejectSingleResponse {
+  status: "recorded";
+  rejection_count: number;
+}
+
+export interface RejectAllResponse {
+  status: "action_required";
+  npp_updated: string[];
+  message: string;
+}
+
+export interface ActionResolveResponse {
+  status: "reset_complete" | "memories_kept";
+  cleared?: string[];
+  preserved?: string[];
+  reset?: string[];
+  next_phase: string;
+  reply?: string;
+}
+
+export interface PropertyDetailResponse {
+  ai_summary: string;
+  pros: string[];
+  cons: string[];
+  is_near_match: boolean;
+  degraded: boolean;
+}
+
+export interface UpdateRequirementsRequest {
+  session_id: string;
+  updated_fields: Record<string, any>;
+}
+
+export interface UpdateRequirementsResponse {
+  status: "updated";
+  cleared_dialogue_segments: string[];
+  npp_cleared_tags: string[];
+  search_session_reset: boolean;
+  rejected_property_ids_cleared: boolean;
+}
