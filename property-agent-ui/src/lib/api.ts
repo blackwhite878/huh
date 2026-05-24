@@ -16,10 +16,11 @@ import type {
 const BASE = (() => {
   if (typeof import.meta !== "undefined" && import.meta.env) {
     return (
-      (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "/api/v1"
+      (import.meta.env.VITE_API_BASE_URL as string | undefined) ??
+      "http://localhost:8000/api/v1"
     );
   }
-  return "/api/v1";
+  return "http://localhost:8000/api/v1";
 })();
 
 const TRANSPORT: "sse" | "polling" =
@@ -102,13 +103,17 @@ function pollLoop<T>(
   intervalMs = 3000,
 ): Stop {
   let cancelled = false;
+  let inFlight = false;
   const tick = async () => {
-    if (cancelled) return;
+    if (cancelled || inFlight) return;
+    inFlight = true;
     try {
       const data = await fn();
       if (!cancelled) onData(data);
     } catch (e) {
       console.warn("[poll] error", e);
+    } finally {
+      inFlight = false;
     }
   };
   tick();

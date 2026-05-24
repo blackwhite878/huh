@@ -57,7 +57,9 @@ interface AppStore {
 
   // Rejection
   rejectionCount: number;
+  rejectedIds: string[];
   setRejectionCount: (n: number) => void;
+  addRejectedId: (id: string) => void;
 
   // Cleanup handles
   pollHandles: ReturnType<typeof setInterval>[];
@@ -116,7 +118,14 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }),
 
   rejectionCount: 0,
+  rejectedIds: [],
   setRejectionCount: (n) => set({ rejectionCount: n }),
+  addRejectedId: (id) =>
+    set((st) =>
+      st.rejectedIds.includes(id)
+        ? st
+        : { rejectedIds: [...st.rejectedIds, id] },
+    ),
 
   pollHandles: [],
   registerHandle: (h) =>
@@ -138,6 +147,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       pendingConflict: null,
       searchStage: null,
       rejectionCount: 0,
+      rejectedIds: [],
       pollHandles: [],
       ...initialResults,
     });
@@ -150,6 +160,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       pendingConflict: null,
       searchStage: null,
       rejectionCount: 0,
+      rejectedIds: [],
       pollHandles: [],
       ...initialResults,
     });

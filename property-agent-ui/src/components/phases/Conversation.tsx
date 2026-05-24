@@ -16,6 +16,7 @@ export function Conversation() {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
+  const greetedRef = useRef(false);
 
   const locked =
     appState === "SEARCHING" || appState === "SEMANTIC_ALIGNING" || sending;
@@ -24,14 +25,18 @@ export function Conversation() {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages.length, pendingConflict]);
 
-  // Seed with greeting once
+  // Seed with greeting once (guard against StrictMode double-invoke)
   useEffect(() => {
+    if (greetedRef.current) return;
     if (messages.length === 0) {
+      greetedRef.current = true;
       appendMessage({
         role: "assistant",
         content:
           "Hi — I have your profile ready. Tell me a little more about the home you have in mind. Anything specific about location, layout, or lifestyle?",
       });
+    } else {
+      greetedRef.current = true;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

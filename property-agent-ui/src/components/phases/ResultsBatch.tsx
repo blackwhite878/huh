@@ -21,10 +21,12 @@ export function ResultsBatch() {
   const hasMore = useAppStore((s) => s.hasMore);
   const totalAvailable = useAppStore((s) => s.totalAvailable);
   const rejectionCount = useAppStore((s) => s.rejectionCount);
+  const rejectedIds = useAppStore((s) => s.rejectedIds);
   const degraded = useAppStore((s) => s.degraded);
   const batchIndex = useAppStore((s) => s.batchIndex);
   const setResults = useAppStore((s) => s.setResults);
   const setRejectionCount = useAppStore((s) => s.setRejectionCount);
+  const addRejectedId = useAppStore((s) => s.addRejectedId);
   const setAppState = useAppStore((s) => s.setAppState);
 
   const fetchNext = async () => {
@@ -40,12 +42,18 @@ export function ResultsBatch() {
 
   const reject = async (propertyId: string, reason: string) => {
     if (!sessionId) return;
+    // Optimistically mark rejected so UI stays in sync with store.
+    addRejectedId(propertyId);
     try {
       const data = await api.rejectSingle(sessionId, propertyId, reason);
       setRejectionCount(data.rejection_count);
-      if (data.rejection_count === totalAvailable) {
+      if (data.rejection_count >= totalAvailable && totalAvailable > 0) {
         setAppState("ALL_REJECTED");
-        await api.rejectAll(sessionId);
+        try {
+          await api.rejectAll(sessionId);
+        } catch (e) {
+          console.warn("[rejectAll] failed", e);
+        }
         setAppState("ACTION_REQUIRED_UI");
       }
     } catch (e) {
@@ -95,6 +103,7 @@ export function ResultsBatch() {
             key={p.property_id}
             property={p}
             degraded={degraded}
+            rejected={rejectedIds.includes(p.property_id)}
             onReject={reject}
           />
         ))}
@@ -118,15 +127,16 @@ export function ResultsBatch() {
 function PropertyCard({
   property,
   degraded,
+  rejected,
   onReject,
 }: {
   property: PropertyResult;
   degraded: boolean;
+  rejected: boolean;
   onReject: (id: string, reason: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [reason, setReason] = useState("");
-  const [rejected, setRejected] = useState(false);
 
   if (rejected) {
     return (
@@ -256,7 +266,7 @@ function PropertyCard({
                 onClick={() => {
                   if (!reason.trim()) return;
                   onReject(property.property_id, reason);
-                  setRejected(true);
+                  setOpen(false);
                 }}
                 className="h-8 rounded-lg bg-foreground text-background"
               >

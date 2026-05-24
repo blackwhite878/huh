@@ -35,6 +35,7 @@ export function PhaseOneForm() {
   const setPhase1Form = useAppStore((s) => s.setPhase1Form);
   const setAppState = useAppStore((s) => s.setAppState);
   const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState<Phase1Form>({
     budget: 500000,
     agent_style: "professional",
@@ -52,6 +53,7 @@ export function PhaseOneForm() {
   const submit = async () => {
     if (!valid || submitting) return;
     setSubmitting(true);
+    setError(null);
     try {
       setPhase1Form(form);
       const res = await api.initSession(form);
@@ -59,9 +61,11 @@ export function PhaseOneForm() {
       setAppState("SEMANTIC_ALIGNING");
     } catch (e) {
       console.error(e);
-      // UI shell: even if API fails, still transition so flow can be inspected
-      setSessionId(crypto.randomUUID());
-      setAppState("SEMANTIC_ALIGNING");
+      setError(
+        e instanceof Error
+          ? `Couldn't reach the agent backend: ${e.message}`
+          : "Couldn't reach the agent backend. Please try again.",
+      );
     } finally {
       setSubmitting(false);
     }
@@ -203,6 +207,12 @@ export function PhaseOneForm() {
             </div>
           </div>
         </div>
+
+        {error && (
+          <div className="border-t border-destructive/40 bg-destructive/10 px-8 py-3 text-sm text-destructive md:px-10">
+            {error}
+          </div>
+        )}
 
         <div className="flex items-center justify-between gap-4 border-t border-border/60 bg-surface/40 px-8 py-5 md:px-10">
           <div className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
