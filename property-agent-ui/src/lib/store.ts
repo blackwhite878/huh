@@ -24,7 +24,8 @@ interface AppStore {
   // Semantic tags
   semanticTags: string[];
   alignmentWarning: boolean;
-  setSemanticTags: (tags: string[], warning?: boolean) => void;
+  alignmentError: string | null;
+  setSemanticTags: (tags: string[], warning?: boolean, error?: string | null) => void;
 
   // Dialogue
   dialogueMessages: DialogueMessage[];
@@ -92,8 +93,9 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   semanticTags: [],
   alignmentWarning: false,
-  setSemanticTags: (tags, warning = false) =>
-    set({ semanticTags: tags, alignmentWarning: warning }),
+  alignmentError: null,
+  setSemanticTags: (tags, warning = false, error = null) =>
+    set({ semanticTags: tags, alignmentWarning: warning, alignmentError: error }),
 
   dialogueMessages: [],
   appendMessage: (m) =>

@@ -21,13 +21,59 @@ from npp_enum import NPP_ENUM_FULL
 # Load .env at module import (idempotent)
 load_dotenv()
 
-# Semaphore for LLM concurrent call limit
-# Read from config.yaml in production
-llm_semaphore = asyncio.Semaphore(3)
+
+def _load_config() -> dict:
+    """Load backend/config.yaml. Returns {} if missing/unreadable so we never crash at import."""
+    cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml")
+    try:
+        import yaml  # PyYAML
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+            return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        print(f"[llm_client] config.yaml not found at {cfg_path} — using defaults")
+        return {}
+    except Exception as e:
+        print(f"[llm_client] failed to load config.yaml: {e} — using defaults")
+        return {}
+
+
+_CONFIG = _load_config()
+_LLM_CFG = _CONFIG.get("llm", {}) if isinstance(_CONFIG.get("llm"), dict) else {}
+LLM_MODEL: str = _LLM_CFG.get("model", "deepseek-ai/DeepSeek-V3.2-TEE")
+LLM_MAX_TOKENS: int = int(_LLM_CFG.get("max_tokens", 2000))
+LLM_CONCURRENCY: int = int(_LLM_CFG.get("concurrency", 3))
+print(f"[llm_client] model={LLM_MODEL} max_tokens={LLM_MAX_TOKENS} concurrency={LLM_CONCURRENCY}")
+
+# Semaphore for LLM concurrent call limit (from config.yaml)
+llm_semaphore = asyncio.Semaphore(LLM_CONCURRENCY)
+
 
 # FIX B5: read credentials from .env per Backend.md §2 instead of hardcoded placeholder.
 CHUTES_AI_API_KEY = os.getenv("CHUTES_AI_API_KEY", "")
-CHUTES_AI_BASE_URL = os.getenv("CHUTES_AI_BASE_URL", "https://llm.chutes.ai/v1")
+
+
+def _normalize_base_url(raw: str) -> str:
+    """
+    Make the Chutes base URL bulletproof:
+      - ensure http(s):// scheme (defaults to https)
+      - strip trailing slash
+      - ensure it ends with /v1 (Chutes path 404s otherwise)
+    """
+    url = (raw or "").strip()
+    if not url:
+        url = "https://llm.chutes.ai/v1"
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    url = url.rstrip("/")
+    if not url.endswith("/v1"):
+        url = url + "/v1"
+    return url
+
+
+CHUTES_AI_BASE_URL = _normalize_base_url(os.getenv("CHUTES_AI_BASE_URL", ""))
+print(f"[llm_client] CHUTES_AI_BASE_URL resolved to: {CHUTES_AI_BASE_URL}")
+
 
 if not CHUTES_AI_API_KEY:
     print(
@@ -67,7 +113,7 @@ class LLMClient:
         response.raise_for_status()
         return response.json()
 
-    async def chat(self, messages: list[dict], model: str = "deepseek-ai/DeepSeek-V3-0324") -> ChatLLMOutput:
+    async def chat(self, messages: list[dict], model: str = LLM_MODEL) -> ChatLLMOutput:
         """
         Call Chutes AI for chat with structured JSON output.
         Returns validated ChatLLMOutput or raises exception.
@@ -103,19 +149,14 @@ class LLMClient:
         """
         Identify BOTH positive and negative property preferences.
 
-        The LLM is the sole authority on validity and polarity. We do NOT
-        constrain output to PPP_ENUM_FULL / NPP_ENUM_FULL — the existing
-        enums are passed only as hints / canonical naming examples so the
-        model prefers known keys when the concept matches.
-
-        Returns {"positive": [...tags...], "negative": [...tags...]}.
-        On any failure returns {"positive": [], "negative": []}.
+        Failure semantics:
+          - Network / HTTP / timeout / JSON-parse failures → RAISE (caller persists as alignment_error).
+          - LLM returned valid JSON but both arrays empty → return {"positive": [], "negative": []}
+            (genuine "model found nothing", NOT a transport error).
         """
         from positive_enum import PPP_ENUM_FULL
 
-        # Escape description so embedded quotes don't break the prompt JSON
         safe_desc = json.dumps(description, ensure_ascii=False)
-
         ppp_hint = list(PPP_ENUM_FULL.keys())
         npp_hint = list(NPP_ENUM_FULL.keys())
 
@@ -132,22 +173,18 @@ class LLMClient:
    - 否定（→ negative）：「不要 / 沒有 / 避免 / 拒絕 / 不想 / no / without / avoid / dealbreaker」
    - 肯定（→ positive）：「要 / 必須 / 希望 / 需要 / want / need / must have / prefer」
 2. 隱式信號：用戶輸入若為純名詞清單（如 "condo, east-facing, security"），
-   且上下文無法判斷，**預設視為 negative（dealbreakers）**，因為此欄位即「要避開的事項」。
+   且上下文無法判斷，**預設視為 negative（dealbreakers）**。
    一旦同一輸入中出現任一肯定關鍵詞，則改回逐項按語義判斷。
-3. 同一概念若同時出現否定與肯定（如 "no west-facing, want east-facing"），各取對應極性。
+3. 同一概念若同時出現否定與肯定，各取對應極性。
 
 # 標籤命名規則
 - snake_case，全小寫，不含空格、連字符、引號。
-- 例：east-facing → east_facing；need security → needs_security；no pool → no_pool。
-- 屬性類型詞（condo / apartment / landed / terrace / bungalow / studio）**不是偏好**，
-  忽略，不要輸出。
-- 不確定的詞寧可丟掉，**禁止編造**。
+- 屬性類型詞（condo / apartment / landed / terrace / bungalow / studio）忽略，不要輸出。
+- 不確定的詞寧可丟掉，禁止編造。
 
-# 命名提示（非強制白名單，僅供風格對齊；遇到等價概念請優先用這些 key）
+# 命名提示（非強制白名單，僅供風格對齊）
 常見 positive key 示例：{ppp_hint}
 常見 negative key 示例：{npp_hint}
-若用戶語義與上述任一 key 等價（不論大小寫/空格/連字符差異），輸出該 key。
-若用戶提出列表外的合理偏好，自行用 snake_case 命名輸出即可。
 
 # 輸出格式
 僅輸出 JSON，不要任何說明文字或 markdown 圍欄：
@@ -157,42 +194,47 @@ class LLMClient:
             }
         ]
 
+        payload = {
+            "model": LLM_MODEL,
+            "messages": messages,
+            "max_tokens": 500,
+            "response_format": {"type": "json_object"},
+        }
+
+        # _call_api raises on network/HTTP/timeout — DO NOT swallow.
+        response = await self._call_api(payload)
+
         try:
-            payload = {
-                "model": "deepseek-ai/DeepSeek-V3-0324",
-                "messages": messages,
-                "max_tokens": 500,
-                "response_format": {"type": "json_object"},
-            }
-
-            response = await self._call_api(payload)
             content = response["choices"][0]["message"]["content"]
-            print(f"[semantic_alignment] raw LLM content: {content!r}")
+        except (KeyError, IndexError, TypeError) as e:
+            raise RuntimeError(f"semantic_alignment: malformed LLM response shape: {e}") from e
+
+        print(f"[semantic_alignment] raw LLM content: {content!r}")
+
+        try:
             parsed = json.loads(content)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"semantic_alignment: LLM returned non-JSON: {e}") from e
 
-            def _normalize(raw) -> list[str]:
-                if not isinstance(raw, list):
-                    return []
-                out: list[str] = []
-                seen: set[str] = set()
-                for item in raw:
-                    if not isinstance(item, str):
-                        continue
-                    key = item.strip().lower().replace("-", "_").replace(" ", "_")
-                    if not key or key in seen:
-                        continue
-                    seen.add(key)
-                    out.append(key)
-                return out
+        def _normalize(raw) -> list[str]:
+            if not isinstance(raw, list):
+                return []
+            out: list[str] = []
+            seen: set[str] = set()
+            for item in raw:
+                if not isinstance(item, str):
+                    continue
+                key = item.strip().lower().replace("-", "_").replace(" ", "_")
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                out.append(key)
+            return out
 
-            pos = _normalize(parsed.get("positive", []))
-            neg = _normalize(parsed.get("negative", []))
-            print(f"[semantic_alignment] normalized → positive={pos} negative={neg}")
-            return {"positive": pos, "negative": neg}
-
-        except Exception as e:
-            print(f"[semantic_alignment] failed: {e}")
-            return {"positive": [], "negative": []}
+        pos = _normalize(parsed.get("positive", []))
+        neg = _normalize(parsed.get("negative", []))
+        print(f"[semantic_alignment] normalized → positive={pos} negative={neg}")
+        return {"positive": pos, "negative": neg}
 
 
     async def generate_remarks(
@@ -251,7 +293,7 @@ class LLMClient:
 
         try:
             payload = {
-                "model": "deepseek-ai/DeepSeek-V3-0324",
+                "model": LLM_MODEL,
                 "messages": messages,
                 "max_tokens": 2000,
                 "response_format": {"type": "json_object"},
@@ -298,7 +340,7 @@ class LLMClient:
 
         try:
             payload = {
-                "model": "deepseek-ai/DeepSeek-V3-0324",
+                "model": LLM_MODEL,
                 "messages": messages,
                 "max_tokens": 500,
                 "response_format": {"type": "json_object"},

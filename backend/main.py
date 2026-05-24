@@ -2,6 +2,9 @@
 FastAPI application - Main entry point with all API endpoints.
 """
 from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.responses import StreamingResponse
+import asyncio
+import json as _json
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -59,15 +62,16 @@ app.add_middleware(
 # ─── Background tasks ────────────────────────────────────────────────
 async def async_semantic_alignment(session_id: str, description: str):
     """
-    Background task: Run semantic alignment and update session.
-    semantic_alignment() now returns {"positive": [...], "negative": [...]}.
+    Background task: run semantic alignment, persist tags + any hard error.
     """
     try:
-        result = await llm_client.semantic_alignment(description)  # dict
-        update_semantic_tags(session_id, result)
+        result = await llm_client.semantic_alignment(description)
+        update_semantic_tags(session_id, result, error=None)
     except Exception as e:
-        print(f"Semantic alignment error: {e}")
-        update_semantic_tags(session_id, {"positive": [], "negative": []})
+        # HARD failure (network/HTTP/parse) — surface to frontend, don't pretend it's "ready with 0 tags".
+        msg = f"{type(e).__name__}: {e}"
+        print(f"[async_semantic_alignment] hard failure: {msg}")
+        update_semantic_tags(session_id, {"positive": [], "negative": []}, error=msg)
 
 
 
@@ -117,7 +121,54 @@ async def session_ready(session_id: str):
         semantic_tags=phase1.semantic_tags,
         positive_tags=phase1.positive_tags,
         alignment_warning=(total == 0),
+        error=phase1.alignment_error,
     )
+
+
+# ─── 4.2b GET /api/v1/session_ready/{session_id}/stream (SSE) ───────
+@app.get("/api/v1/session_ready/{session_id}/stream")
+async def session_ready_stream(session_id: str):
+    """
+    SSE companion to /session_ready. Pushes one event every 1s until status='ready',
+    then closes. Frontend EventSource consumes `data: <json>` lines.
+    """
+    if not get_dialogue_session(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    async def event_stream():
+        max_iters = 120  # 120 * 1s = 2 min hard cap
+        for _ in range(max_iters):
+            ds = get_dialogue_session(session_id)
+            if not ds:
+                payload = {"status": "aligning"}
+            else:
+                p = ds.phase1_data
+                if not p.semantic_alignment_done:
+                    payload = {"status": "aligning"}
+                else:
+                    total = len(p.semantic_tags) + len(p.positive_tags)
+                    payload = {
+                        "status": "ready",
+                        "semantic_tags": p.semantic_tags,
+                        "positive_tags": p.positive_tags,
+                        "alignment_warning": (total == 0),
+                        "error": p.alignment_error,
+                    }
+            yield f"data: {_json.dumps(payload)}\n\n"
+            if payload["status"] == "ready":
+                return
+            await asyncio.sleep(1.0)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
 
 
 

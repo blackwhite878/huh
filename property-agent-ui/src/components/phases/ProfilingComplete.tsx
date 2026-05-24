@@ -6,6 +6,7 @@ import { partitionTags } from "@/lib/semantic";
 export function ProfilingComplete() {
   const semanticTags = useAppStore((s) => s.semanticTags);
   const alignmentWarning = useAppStore((s) => s.alignmentWarning);
+  const alignmentError = useAppStore((s) => s.alignmentError);
   const setAppState = useAppStore((s) => s.setAppState);
 
   const { negative, positive } = partitionTags(semanticTags);
@@ -28,6 +29,15 @@ export function ProfilingComplete() {
       </div>
 
       <div className="glass-strong rounded-3xl border border-border p-8 shadow-[var(--shadow-elegant)]">
+        {alignmentError && (
+          <div className="mb-5 flex items-start gap-2.5 rounded-xl border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive-foreground/90">
+            <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-destructive" />
+            <div>
+              <div className="font-medium">Semantic alignment failed</div>
+              <div className="mt-0.5 break-all font-mono text-[11px] opacity-80">{alignmentError}</div>
+            </div>
+          </div>
+        )}
         {alignmentWarning && (
           <div className="mb-5 flex items-start gap-2.5 rounded-xl border border-warning/40 bg-warning/10 p-3 text-sm text-warning-foreground/90">
             <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-warning" />

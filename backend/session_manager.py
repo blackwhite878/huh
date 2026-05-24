@@ -68,6 +68,7 @@ def get_search_session(session_id: str) -> Optional[SearchSession]:
 def update_semantic_tags(
     session_id: str,
     payload: "dict[str, list[str]] | list[str]",
+    error: Optional[str] = None,
 ) -> None:
     """
     Update semantic alignment tags in dialogue session.
@@ -89,6 +90,7 @@ def update_semantic_tags(
     dialogue_session.phase1_data.semantic_tags = negative
     dialogue_session.phase1_data.positive_tags = positive
     dialogue_session.phase1_data.semantic_alignment_done = True
+    dialogue_session.phase1_data.alignment_error = error
 
 
 

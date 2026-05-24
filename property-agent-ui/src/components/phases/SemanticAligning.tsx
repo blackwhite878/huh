@@ -3,55 +3,53 @@ import { useAppStore } from "@/lib/store";
 import { subscribeSessionReady } from "@/lib/api";
 import { deriveTagsFromDescription } from "@/lib/semantic";
 
-// Backend-first. Only fall back to local regex when backend genuinely times out.
-const BACKEND_TIMEOUT_MS = 30_000;
+// Backend is authoritative. The local-derived path is a UI placeholder ONLY —
+// even after it runs, a subsequent backend "ready" event will overwrite it.
+const LOCAL_PLACEHOLDER_AFTER_MS = 60_000;
 
 export function SemanticAligning() {
   const sessionId = useAppStore((s) => s.sessionId);
-  const phase1Form = useAppStore((s) => s.phase1Form);
-  const style = phase1Form?.agent_style ?? "professional";
+  const description = useAppStore((s) => s.phase1Form?.description) ?? "";
+  const style = useAppStore((s) => s.phase1Form?.agent_style) ?? "professional";
   const setSemanticTags = useAppStore((s) => s.setSemanticTags);
   const setAppState = useAppStore((s) => s.setAppState);
 
   useEffect(() => {
     if (!sessionId) return;
-    let done = false;
     let stop: (() => void) | null = null;
-    let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
-
-    const finish = (tags: string[], warning: boolean) => {
-      if (done) return;
-      done = true;
-      setSemanticTags(tags, warning);
-      setAppState("PROFILING_COMPLETE");
-      stop?.();
-      if (fallbackTimer) clearTimeout(fallbackTimer);
-    };
+    let placeholderTimer: ReturnType<typeof setTimeout> | null = null;
+    let backendWon = false;
 
     stop = subscribeSessionReady(sessionId, (data) => {
-      if (data.status === "ready") {
-        // Merge backend's two arrays into the prefixed shape partitionTags expects.
-        const merged = [
-          ...(data.positive_tags ?? []).map((t) => `pos:${t}`),
-          ...(data.semantic_tags ?? []).map((t) => `neg:${t}`),
-        ];
-        finish(merged, !!data.alignment_warning);
-      }
+      if (data.status !== "ready") return;
+      backendWon = true;
+      const merged = [
+        ...(data.positive_tags ?? []).map((t) => `pos:${t}`),
+        ...(data.semantic_tags ?? []).map((t) => `neg:${t}`),
+      ];
+      // Backend is authoritative: always overwrite, even if placeholder ran first.
+      setSemanticTags(merged, !!data.alignment_warning, data.error ?? null);
+      setAppState("PROFILING_COMPLETE");
+      if (placeholderTimer) clearTimeout(placeholderTimer);
+      stop?.();
     });
 
-
-    fallbackTimer = setTimeout(() => {
-      // Backend didn't respond in time — derive from description as warning.
-      const tags = deriveTagsFromDescription(phase1Form?.description ?? "");
-      finish(tags, true);
-    }, BACKEND_TIMEOUT_MS);
+    placeholderTimer = setTimeout(() => {
+      if (backendWon) return;
+      const tags = deriveTagsFromDescription(description);
+      setSemanticTags(
+        tags,
+        true,
+        "Backend slow — showing locally derived tags. Will refresh if backend responds.",
+      );
+      setAppState("PROFILING_COMPLETE");
+    }, LOCAL_PLACEHOLDER_AFTER_MS);
 
     return () => {
-      done = true;
       stop?.();
-      if (fallbackTimer) clearTimeout(fallbackTimer);
+      if (placeholderTimer) clearTimeout(placeholderTimer);
     };
-  }, [sessionId, phase1Form, setSemanticTags, setAppState]);
+  }, [sessionId, description, setSemanticTags, setAppState]);
 
   const copy =
     style === "professional"

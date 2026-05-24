@@ -18,6 +18,7 @@ class Phase1Data(BaseModel):
     semantic_tags: list[str] = Field(default_factory=list)   # negative (NPP keys)
     positive_tags: list[str] = Field(default_factory=list)   # positive (PPP keys)
     semantic_alignment_done: bool = False
+    alignment_error: Optional[str] = None     # NEW — hard-failure cause for UI
 
 
 
@@ -121,6 +122,7 @@ class SessionReadyResponse(BaseModel):
     semantic_tags: Optional[list[str]] = None     # negative (NPP keys)
     positive_tags: Optional[list[str]] = None     # positive (PPP keys)
     alignment_warning: bool = False
+    error: Optional[str] = None                   # NEW — surfaces real failure cause
 
 
 

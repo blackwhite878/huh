@@ -75,6 +75,7 @@ export interface SessionReadyResponse {
   semantic_tags?: string[];   // negative (NPP keys)
   positive_tags?: string[];   // positive (PPP keys)
   alignment_warning?: boolean;
+  error?: string | null;      // NEW — hard-failure cause from backend
 }
 
 
