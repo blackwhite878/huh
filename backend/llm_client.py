@@ -3,8 +3,10 @@ Chutes AI integration with retry logic, concurrent control, and Pydantic validat
 """
 import asyncio
 import json
+import os
 from typing import Optional
 import httpx
+from dotenv import load_dotenv
 from tenacity import (
     retry,
     stop_after_attempt,
@@ -16,13 +18,22 @@ from pydantic import ValidationError
 from schemas import ChatLLMOutput, PropertyRemark, RemarksResponse
 from npp_enum import NPP_ENUM_FULL
 
+# Load .env at module import (idempotent)
+load_dotenv()
+
 # Semaphore for LLM concurrent call limit
 # Read from config.yaml in production
 llm_semaphore = asyncio.Semaphore(3)
 
-# Placeholder - replace with actual Chutes AI setup
-CHUTES_AI_API_KEY = "your-chutes-ai-key-here"
-CHUTES_AI_BASE_URL = "https://llm.chutes.ai/v1"
+# FIX B5: read credentials from .env per Backend.md §2 instead of hardcoded placeholder.
+CHUTES_AI_API_KEY = os.getenv("CHUTES_AI_API_KEY", "")
+CHUTES_AI_BASE_URL = os.getenv("CHUTES_AI_BASE_URL", "https://llm.chutes.ai/v1")
+
+if not CHUTES_AI_API_KEY:
+    print(
+        "[llm_client] WARNING: CHUTES_AI_API_KEY is empty. "
+        "Set it in backend/.env before calling LLM endpoints."
+    )
 
 
 class LLMClient:
@@ -141,9 +152,14 @@ class LLMClient:
         Generate AI remarks for Top 10 properties in single LLM call.
         Returns validated RemarksResponse.
         """
+        # FIX B6: original f-string had the tier ternary INSIDE the string literal,
+        # so the LLM received the literal source text. Evaluate it outside the f-string.
+        def _tier_label(p) -> str:
+            return "tier_1" if getattr(p, "tier", None) == "tier_1" else "tier_2"
+
         props_summary = "\n".join([
             f"ID: {p.property_id}, Title: {p.title}, Price: {p.price}, "
-            f"Tier: tier_1 if hasattr(p, 'tier') and p.tier == 'tier_1' else 'tier_2', "
+            f"Tier: {_tier_label(p)}, "
             f"Features: {', '.join(p.feature_tags)}"
             for p in properties
         ])

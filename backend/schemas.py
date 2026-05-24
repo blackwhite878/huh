@@ -128,6 +128,8 @@ class ChatResponse(BaseModel):
     proposed_value: Optional[Any] = None
 
 
+# FIX B2: results was list[PropertyRemark] but main.py returns list[Property].
+# Aligned to actual payload shape; frontend PropertyResult is a superset and accepts both.
 class SearchStatusResponse(BaseModel):
     status: Literal["scraping", "ranking", "generating_remarks", "complete"]
     batch_index: Optional[int] = None
@@ -135,20 +137,23 @@ class SearchStatusResponse(BaseModel):
     has_more: Optional[bool] = None
     tier3_triggered: Optional[bool] = None
     degraded: Optional[bool] = None
-    results: Optional[list[PropertyRemark]] = None
+    results: Optional[list[Property]] = None
 
 
+# FIX B3: same as B2.
 class NextBatchResponse(BaseModel):
     batch_index: int
     total_available: int
     has_more: bool
     tier3_triggered: bool
     degraded: bool
-    results: list[PropertyRemark]
+    results: list[Property]
 
 
+# FIX B1: added rejection_count which main.py already passes.
 class RejectSingleResponse(BaseModel):
     status: Literal["recorded"]
+    rejection_count: int
 
 
 class RejectAllResponse(BaseModel):

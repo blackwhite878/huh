@@ -28,7 +28,7 @@ export function Conversation() {
   useEffect(() => {
     if (messages.length === 0) {
       appendMessage({
-        role: "agent",
+        role: "assistant",
         content:
           "Hi — I have your profile ready. Tell me a little more about the home you have in mind. Anything specific about location, layout, or lifestyle?",
       });
@@ -44,7 +44,7 @@ export function Conversation() {
     setSending(true);
     try {
       const res = await api.chat(sessionId, text);
-      appendMessage({ role: "agent", content: res.reply });
+      appendMessage({ role: "assistant", content: res.reply });
       if (res.status === "pending_confirmation") {
         setPendingConflict({
           conflicting_field: res.conflicting_field ?? "",
@@ -70,7 +70,7 @@ export function Conversation() {
           [pendingConflict.conflicting_field]: pendingConflict.proposed_value,
         });
         appendMessage({
-          role: "system",
+          role: "assistant",
           content: `Updated ${pendingConflict.conflicting_field}.`,
         });
       } catch (e) {
@@ -78,7 +78,7 @@ export function Conversation() {
       }
     } else {
       appendMessage({
-        role: "system",
+        role: "assistant",
         content: "Kept original requirement.",
       });
     }
@@ -105,6 +105,7 @@ export function Conversation() {
           {messages.map((m, i) => (
             <MessageBubble key={i} role={m.role} content={m.content} />
           ))}
+
 
           {pendingConflict && (
             <div className="flex animate-in fade-in slide-in-from-bottom-2 justify-start">
@@ -186,19 +187,11 @@ function MessageBubble({
   role,
   content,
 }: {
-  role: "user" | "agent" | "system";
+  role: "user" | "assistant";
   content: string;
 }) {
-  if (role === "system") {
-    return (
-      <div className="flex justify-center">
-        <span className="rounded-full border border-border bg-surface-raised/60 px-3 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-          {content}
-        </span>
-      </div>
-    );
-  }
   const isUser = role === "user";
+
   return (
     <div
       className={[

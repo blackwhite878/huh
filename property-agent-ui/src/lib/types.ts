@@ -2,6 +2,7 @@
 // Type contracts — must stay in sync with Backend.md & Frontend.md
 // ============================================================================
 
+// AppState — aligned to Frontend.md §1 (13 states)
 export type AppState =
   | "IDLE"
   | "SEMANTIC_ALIGNING"
@@ -13,8 +14,9 @@ export type AppState =
   | "BATCH_2_DISPLAY"
   | "ALL_REJECTED"
   | "ACTION_REQUIRED_UI"
+  | "RE_SEARCHING"
   | "TIER3_NO_RESULT"
-  | "ERROR_DEGRADED_OVERLAY";
+  | "PHASE_1_INITIAL";
 
 export type AgentStyle = "professional" | "friendly" | "active";
 export type Identity = "first_time_buyer" | "investor" | "upgrader";
@@ -31,11 +33,12 @@ export interface Phase1Form {
   target: string;
   identity: Identity;
   gender: Gender;
-  description: string; // Added description field
+  description: string;
 }
 
+// Aligned to backend DialogueMessage.role contract (user | assistant only)
 export interface DialogueMessage {
-  role: "user" | "agent" | "system";
+  role: "user" | "assistant";
   content: string;
   timestamp?: number;
 }
@@ -89,6 +92,16 @@ export interface SearchStatusResponse {
   results?: PropertyResult[];
 }
 
+// Distinct from SearchStatusResponse — used by POST /next_batch
+export interface NextBatchResponse {
+  batch_index: number;
+  total_available: number;
+  has_more: boolean;
+  tier3_triggered: boolean;
+  degraded: boolean;
+  results: PropertyResult[];
+}
+
 export interface RejectSingleResponse {
   status: "recorded";
   rejection_count: number;
@@ -119,7 +132,7 @@ export interface PropertyDetailResponse {
 
 export interface UpdateRequirementsRequest {
   session_id: string;
-  updated_fields: Record<string, any>;
+  updated_fields: Record<string, unknown>;
 }
 
 export interface UpdateRequirementsResponse {

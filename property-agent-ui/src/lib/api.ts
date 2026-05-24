@@ -5,6 +5,7 @@
 import type {
   ChatResponse,
   InitSessionResponse,
+  NextBatchResponse,
   Phase1Form,
   RejectAllResponse,
   RejectSingleResponse,
@@ -59,7 +60,7 @@ export const api = {
     getJSON<SearchStatusResponse>(`/search_status/${sessionId}`),
 
   nextBatch: (sessionId: string) =>
-    postJSON<SearchStatusResponse>("/next_batch", { session_id: sessionId }),
+    postJSON<NextBatchResponse>("/next_batch", { session_id: sessionId }),
 
   rejectSingle: (sessionId: string, property_id: string, reason: string) =>
     postJSON<RejectSingleResponse>("/reject_single", {

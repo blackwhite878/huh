@@ -1,21 +1,23 @@
 import { RotateCcw, ArrowRight, Brain } from "lucide-react";
 import { useAppStore } from "@/lib/store";
-import { apiClient } from "@/lib/api-client";
-import { useActionResolution } from "@/hooks/use-api";
+import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 
 export function ActionRequired() {
   const sessionId = useAppStore((s) => s.sessionId);
-  const { resolveAction } = useActionResolution(sessionId);
+  const resetAll = useAppStore((s) => s.resetAll);
+  const resetForKeepMemories = useAppStore((s) => s.resetForKeepMemories);
 
   const choose = async (action: "new_prompt" | "keep_memories") => {
     if (sessionId) {
       try {
-        await resolveAction(action);
+        await api.resolveAction(sessionId, action);
       } catch (e) {
         console.warn(e);
       }
     }
+    if (action === "new_prompt") resetAll();
+    else resetForKeepMemories();
   };
 
   return (

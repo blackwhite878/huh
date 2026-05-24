@@ -2,7 +2,7 @@ import { useState } from "react";
 import { ArrowRight, Building2, Sparkles } from "lucide-react";
 import { useAppStore } from "@/lib/store";
 import { api } from "@/lib/api";
-import { deriveTagsFromDescription } from "@/lib/semantic";
+
 import type {
   AgentStyle,
   Gender,

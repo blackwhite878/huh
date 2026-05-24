@@ -1,10 +1,11 @@
 import { useState } from "react";
-import { Settings2, ChevronDown, ChevronUp } from "lucide-react";
+import { Settings2, ChevronDown, ChevronUp, X } from "lucide-react";
 import { useAppStore } from "@/lib/store";
 import type { AppState, PropertyResult } from "@/lib/types";
 
 const STATES: AppState[] = [
   "IDLE",
+  "PHASE_1_INITIAL",
   "SEMANTIC_ALIGNING",
   "PROFILING_COMPLETE",
   "CHATTING",
@@ -14,6 +15,7 @@ const STATES: AppState[] = [
   "BATCH_2_DISPLAY",
   "ALL_REJECTED",
   "ACTION_REQUIRED_UI",
+  "RE_SEARCHING",
   "TIER3_NO_RESULT",
 ];
 
@@ -42,7 +44,13 @@ const SAMPLE: PropertyResult[] = [
   },
 ];
 
+// Dev-only state inspector. Gated on import.meta.env.DEV and hidden by default
+// behind a tiny corner pill so it never overlaps real form controls (Phase 1
+// submit button sits in the same bottom-right region).
 export function DevPanel() {
+  const enabled =
+    typeof import.meta !== "undefined" && import.meta.env?.DEV === true;
+  const [mounted, setMounted] = useState(enabled);
   const [open, setOpen] = useState(false);
   const appState = useAppStore((s) => s.appState);
   const setAppState = useAppStore((s) => s.setAppState);
@@ -54,8 +62,9 @@ export function DevPanel() {
   const appendMessage = useAppStore((s) => s.appendMessage);
   const setPhase1Form = useAppStore((s) => s.setPhase1Form);
 
+  if (!mounted) return null;
+
   const seed = (target: AppState) => {
-    // Make sure session exists for downstream phases
     if (!sessionId) setSessionId(crypto.randomUUID());
     if (!useAppStore.getState().phase1Form) {
       setPhase1Form({
@@ -78,7 +87,7 @@ export function DevPanel() {
       case "PENDING_CONFIRMATION":
         setSemanticTags(["west_facing"]);
         appendMessage({
-          role: "agent",
+          role: "assistant",
           content: "Hi — tell me a bit more about your dream home.",
         });
         setPendingConflict({
@@ -124,13 +133,25 @@ export function DevPanel() {
     setAppState(target);
   };
 
+  // Collapsed: tiny non-blocking pill at the very corner.
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        aria-label="Open dev state panel"
+        className="fixed bottom-3 left-3 z-50 flex h-7 items-center gap-1.5 rounded-full border border-border bg-surface-raised/80 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground shadow-sm backdrop-blur hover:text-foreground"
+      >
+        <Settings2 className="h-3 w-3 text-primary" />
+        dev
+      </button>
+    );
+  }
+
   return (
-    <div className="fixed bottom-4 right-4 z-50 font-mono text-xs">
-      <div className="glass-strong rounded-2xl border border-border-strong shadow-[var(--shadow-elegant)]">
-        <button
-          onClick={() => setOpen((v) => !v)}
-          className="flex w-full items-center justify-between gap-2 px-4 py-2.5"
-        >
+    <div className="fixed bottom-3 left-3 z-50 font-mono text-xs">
+      <div className="glass-strong w-72 rounded-2xl border border-border-strong shadow-[var(--shadow-elegant)]">
+        <div className="flex items-center justify-between gap-2 px-3 py-2">
           <div className="flex items-center gap-2">
             <Settings2 className="h-3.5 w-3.5 text-primary" />
             <span className="uppercase tracking-[0.18em] text-muted-foreground">
@@ -140,30 +161,39 @@ export function DevPanel() {
               {appState}
             </span>
           </div>
-          {open ? (
-            <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
-          ) : (
-            <ChevronUp className="h-3.5 w-3.5 text-muted-foreground" />
-          )}
-        </button>
-        {open && (
-          <div className="grid max-w-xs grid-cols-2 gap-1 border-t border-border/60 p-2">
-            {STATES.map((s) => (
-              <button
-                key={s}
-                onClick={() => seed(s)}
-                className={[
-                  "rounded-lg px-2 py-1.5 text-left text-[10px] uppercase tracking-[0.1em] transition-colors",
-                  s === appState
-                    ? "bg-primary text-primary-foreground"
-                    : "hover:bg-muted",
-                ].join(" ")}
-              >
-                {s.toLowerCase().replace(/_/g, " ")}
-              </button>
-            ))}
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setOpen(false)}
+              className="rounded p-1 hover:bg-muted"
+              aria-label="Collapse"
+            >
+              <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
+            </button>
+            <button
+              onClick={() => setMounted(false)}
+              className="rounded p-1 hover:bg-muted"
+              aria-label="Hide dev panel"
+            >
+              <X className="h-3.5 w-3.5 text-muted-foreground" />
+            </button>
           </div>
-        )}
+        </div>
+        <div className="grid grid-cols-2 gap-1 border-t border-border/60 p-2">
+          {STATES.map((s) => (
+            <button
+              key={s}
+              onClick={() => seed(s)}
+              className={[
+                "rounded-lg px-2 py-1.5 text-left text-[10px] uppercase tracking-[0.1em] transition-colors",
+                s === appState
+                  ? "bg-primary text-primary-foreground"
+                  : "hover:bg-muted",
+              ].join(" ")}
+            >
+              {s.toLowerCase().replace(/_/g, " ")}
+            </button>
+          ))}
+        </div>
       </div>
     </div>
   );

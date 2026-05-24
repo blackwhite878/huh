@@ -30,6 +30,7 @@ from session_manager import (
     update_npp_tags,
     reset_all_sessions,
     keep_memories_reset,
+    reset_search_session,  # FIX B4: was missing — caused NameError in update_requirements
     update_semantic_tags,
 )
 from llm_client import llm_client
@@ -41,11 +42,13 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# CORS middleware for frontend integration
+# FIX B9: CORS spec forbids credentials=True with wildcard origins.
+# Browsers silently reject such responses. For MVP we disable credentials;
+# in production list explicit origins instead.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, restrict to frontend domain
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

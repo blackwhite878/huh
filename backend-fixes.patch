@@ -1,0 +1,119 @@
+--- a/backend/schemas.py
++++ b/backend/schemas.py
+@@ -128,6 +128,8 @@
+     proposed_value: Optional[Any] = None
+ 
+ 
++# FIX B2: results was list[PropertyRemark] but main.py returns list[Property].
++# Aligned to actual payload shape; frontend PropertyResult is a superset and accepts both.
+ class SearchStatusResponse(BaseModel):
+     status: Literal["scraping", "ranking", "generating_remarks", "complete"]
+     batch_index: Optional[int] = None
+@@ -135,20 +137,23 @@
+     has_more: Optional[bool] = None
+     tier3_triggered: Optional[bool] = None
+     degraded: Optional[bool] = None
+-    results: Optional[list[PropertyRemark]] = None
++    results: Optional[list[Property]] = None
+ 
+ 
++# FIX B3: same as B2.
+ class NextBatchResponse(BaseModel):
+     batch_index: int
+     total_available: int
+     has_more: bool
+     tier3_triggered: bool
+     degraded: bool
+-    results: list[PropertyRemark]
++    results: list[Property]
+ 
+ 
++# FIX B1: added rejection_count which main.py already passes.
+ class RejectSingleResponse(BaseModel):
+     status: Literal["recorded"]
++    rejection_count: int
+ 
+ 
+ class RejectAllResponse(BaseModel):
+--- a/backend/main.py
++++ b/backend/main.py
+@@ -30,6 +30,7 @@
+     update_npp_tags,
+     reset_all_sessions,
+     keep_memories_reset,
++    reset_search_session,  # FIX B4: was missing — caused NameError in update_requirements
+     update_semantic_tags,
+ )
+ from llm_client import llm_client
+@@ -41,11 +42,13 @@
+     version="1.0.0",
+ )
+ 
+-# CORS middleware for frontend integration
++# FIX B9: CORS spec forbids credentials=True with wildcard origins.
++# Browsers silently reject such responses. For MVP we disable credentials;
++# in production list explicit origins instead.
+ app.add_middleware(
+     CORSMiddleware,
+-    allow_origins=["*"],  # In production, restrict to frontend domain
+-    allow_credentials=True,
++    allow_origins=["*"],
++    allow_credentials=False,
+     allow_methods=["*"],
+     allow_headers=["*"],
+ )
+--- a/backend/llm_client.py
++++ b/backend/llm_client.py
+@@ -3,8 +3,10 @@
+ """
+ import asyncio
+ import json
++import os
+ from typing import Optional
+ import httpx
++from dotenv import load_dotenv
+ from tenacity import (
+     retry,
+     stop_after_attempt,
+@@ -16,13 +18,22 @@
+ from schemas import ChatLLMOutput, PropertyRemark, RemarksResponse
+ from npp_enum import NPP_ENUM_FULL
+ 
++# Load .env at module import (idempotent)
++load_dotenv()
++
+ # Semaphore for LLM concurrent call limit
+ # Read from config.yaml in production
+ llm_semaphore = asyncio.Semaphore(3)
+ 
+-# Placeholder - replace with actual Chutes AI setup
+-CHUTES_AI_API_KEY = "your-chutes-ai-key-here"
+-CHUTES_AI_BASE_URL = "https://llm.chutes.ai/v1"
++# FIX B5: read credentials from .env per Backend.md §2 instead of hardcoded placeholder.
++CHUTES_AI_API_KEY = os.getenv("CHUTES_AI_API_KEY", "")
++CHUTES_AI_BASE_URL = os.getenv("CHUTES_AI_BASE_URL", "https://llm.chutes.ai/v1")
++
++if not CHUTES_AI_API_KEY:
++    print(
++        "[llm_client] WARNING: CHUTES_AI_API_KEY is empty. "
++        "Set it in backend/.env before calling LLM endpoints."
++    )
+ 
+ 
+ class LLMClient:
+@@ -141,9 +152,14 @@
+         Generate AI remarks for Top 10 properties in single LLM call.
+         Returns validated RemarksResponse.
+         """
++        # FIX B6: original f-string had the tier ternary INSIDE the string literal,
++        # so the LLM received the literal source text. Evaluate it outside the f-string.
++        def _tier_label(p) -> str:
++            return "tier_1" if getattr(p, "tier", None) == "tier_1" else "tier_2"
++
+         props_summary = "\n".join([
+             f"ID: {p.property_id}, Title: {p.title}, Price: {p.price}, "
+-            f"Tier: tier_1 if hasattr(p, 'tier') and p.tier == 'tier_1' else 'tier_2', "
++            f"Tier: {_tier_label(p)}, "
+             f"Features: {', '.join(p.feature_tags)}"
+             for p in properties
+         ])

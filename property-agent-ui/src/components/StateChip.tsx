@@ -2,6 +2,7 @@ import type { AppState } from "@/lib/types";
 
 const LABELS: Record<AppState, string> = {
   IDLE: "Phase 1 · Onboarding",
+  PHASE_1_INITIAL: "Phase 1 · Onboarding",
   SEMANTIC_ALIGNING: "Aligning semantic profile",
   PROFILING_COMPLETE: "Profile ready",
   CHATTING: "Phase 2 · Live consultation",
@@ -11,8 +12,8 @@ const LABELS: Record<AppState, string> = {
   BATCH_2_DISPLAY: "Results · Batch 2",
   ALL_REJECTED: "Learning from feedback",
   ACTION_REQUIRED_UI: "Choose next action",
+  RE_SEARCHING: "Re-running search",
   TIER3_NO_RESULT: "Search exhausted",
-  ERROR_DEGRADED_OVERLAY: "Degraded mode",
 };
 
 export function StateChip({ state }: { state: AppState }) {

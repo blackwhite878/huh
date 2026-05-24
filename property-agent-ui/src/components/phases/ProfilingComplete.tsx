@@ -1,11 +1,14 @@
-import { ArrowRight, AlertTriangle, ShieldCheck } from "lucide-react";
+import { ArrowRight, AlertTriangle, ShieldCheck, Minus, Plus } from "lucide-react";
 import { useAppStore } from "@/lib/store";
 import { Button } from "@/components/ui/button";
+import { partitionTags } from "@/lib/semantic";
 
 export function ProfilingComplete() {
   const semanticTags = useAppStore((s) => s.semanticTags);
   const alignmentWarning = useAppStore((s) => s.alignmentWarning);
   const setAppState = useAppStore((s) => s.setAppState);
+
+  const { negative, positive } = partitionTags(semanticTags);
 
   return (
     <div className="mx-auto max-w-2xl">
@@ -18,8 +21,9 @@ export function ProfilingComplete() {
           Your <span className="text-gradient">preference signature</span>
         </h2>
         <p className="mt-3 text-muted-foreground">
-          We detected the following negative preferences. These will be filtered
-          out automatically during your property search.
+          We detected the following preferences. Required features will be
+          prioritised; exclusions will be filtered out during your property
+          search.
         </p>
       </div>
 
@@ -34,26 +38,54 @@ export function ProfilingComplete() {
           </div>
         )}
 
-        <div className="mb-2 font-mono text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
-          Detected exclusions ({semanticTags.length})
+        {/* Required features (positive) */}
+        <div className="mb-6">
+          <div className="mb-2 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
+            <Plus className="h-3 w-3 text-success" />
+            Required features ({positive.length})
+          </div>
+          {positive.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-border bg-surface/40 p-4 text-center text-xs text-muted-foreground">
+              No required features detected yet.
+            </div>
+          ) : (
+            <div className="flex flex-wrap gap-2">
+              {positive.map((tag) => (
+                <span
+                  key={`pos-${tag}`}
+                  className="rounded-full border border-success/30 bg-success/10 px-3 py-1.5 font-mono text-xs text-success"
+                >
+                  +{tag}
+                </span>
+              ))}
+            </div>
+          )}
         </div>
 
-        {semanticTags.length === 0 ? (
-          <div className="rounded-xl border border-dashed border-border bg-surface/40 p-6 text-center text-sm text-muted-foreground">
-            No specific exclusions detected. Tell the agent more in the next step.
+        {/* Exclusions (negative) */}
+        <div>
+          <div className="mb-2 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
+            <Minus className="h-3 w-3 text-primary" />
+            Exclusions ({negative.length})
           </div>
-        ) : (
-          <div className="flex flex-wrap gap-2">
-            {semanticTags.map((tag) => (
-              <span
-                key={tag}
-                className="rounded-full border border-primary/20 bg-primary/[0.06] px-3 py-1.5 font-mono text-xs text-primary"
-              >
-                #{tag}
-              </span>
-            ))}
-          </div>
-        )}
+          {negative.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-border bg-surface/40 p-4 text-center text-xs text-muted-foreground">
+              No specific exclusions detected. Tell the agent more in the next
+              step.
+            </div>
+          ) : (
+            <div className="flex flex-wrap gap-2">
+              {negative.map((tag) => (
+                <span
+                  key={`neg-${tag}`}
+                  className="rounded-full border border-primary/20 bg-primary/[0.06] px-3 py-1.5 font-mono text-xs text-primary"
+                >
+                  −{tag}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
 
         <div className="mt-8 flex items-center justify-end">
           <Button
