@@ -13,6 +13,15 @@ import type {
   SessionReadyResponse,
 } from "./types";
 
+// Extra context attached to every Phase 2 chat call so the backend
+// (and the LLM prompt it builds) can avoid re-asking known facts.
+export interface ChatContext {
+  phase1: Phase1Form;
+  semantic_tags: string[];
+  confirmed_facts: string[];
+  instruction: string;
+}
+
 const BASE = (() => {
   const envBase =
     typeof import.meta !== "undefined" && import.meta.env
@@ -67,8 +76,18 @@ export const api = {
   sessionReady: (sessionId: string) =>
     getJSON<SessionReadyResponse>(`/session_ready/${sessionId}`),
 
-  chat: (sessionId: string, message: string) =>
-    postJSON<ChatResponse>("/chat", { session_id: sessionId, message }),
+  chat: (
+    sessionId: string,
+    message: string,
+    context?: ChatContext,
+  ) =>
+    postJSON<ChatResponse>("/chat", {
+      session_id: sessionId,
+      message,
+      // Optional enrichment so backend can dedupe questions. Unknown
+      // fields are ignored by older backends — safe additive payload.
+      ...(context ? { client_context: context } : {}),
+    }),
 
   searchStatus: (sessionId: string) =>
     getJSON<SearchStatusResponse>(`/search_status/${sessionId}`),

@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Send, Lock, Bot, User as UserIcon, Check, X } from "lucide-react";
 import { useAppStore } from "@/lib/store";
-import { api } from "@/lib/api";
+import { api, type ChatContext } from "@/lib/api";
 import { Button } from "@/components/ui/button";
+import { ThinkingBubble } from "./ThinkingBubble";
 
 export function Conversation() {
   const appState = useAppStore((s) => s.appState);
@@ -12,6 +13,8 @@ export function Conversation() {
   const appendMessage = useAppStore((s) => s.appendMessage);
   const pendingConflict = useAppStore((s) => s.pendingConflict);
   const setPendingConflict = useAppStore((s) => s.setPendingConflict);
+  const phase1Form = useAppStore((s) => s.phase1Form);
+  const semanticTags = useAppStore((s) => s.semanticTags);
 
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -23,7 +26,7 @@ export function Conversation() {
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages.length, pendingConflict]);
+  }, [messages.length, pendingConflict, sending]);
 
   // Seed with greeting once (guard against StrictMode double-invoke)
   useEffect(() => {
@@ -41,6 +44,38 @@ export function Conversation() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Build a Known-Facts block from Phase 1 + Phase 1.5 + everything the
+  // user has already said in Phase 2. We DO NOT try to re-summarise the
+  // dialogue (that would hallucinate facts); we pass it verbatim and let
+  // the backend prompt builder treat it as authoritative context.
+  const chatContext: ChatContext | null = useMemo(() => {
+    if (!phase1Form) return null;
+    const userTurns = messages
+      .filter((m) => m.role === "user")
+      .map((m) => `- ${m.content}`);
+    const confirmed_facts = [
+      `budget: ${phase1Form.budget}`,
+      `identity: ${phase1Form.identity}`,
+      `target: ${phase1Form.target}`,
+      `agent_style: ${phase1Form.agent_style}`,
+      `gender: ${phase1Form.gender}`,
+      `phase1_description: ${phase1Form.description}`,
+      ...(semanticTags.length
+        ? [`semantic_tags: ${semanticTags.join(", ")}`]
+        : []),
+      ...(userTurns.length ? ["user_said_in_phase2:", ...userTurns] : []),
+    ];
+    return {
+      phase1: phase1Form,
+      semantic_tags: semanticTags,
+      confirmed_facts,
+      instruction:
+        "Do NOT re-ask the user for any fact already listed in confirmed_facts. " +
+        "Only ask about information that is genuinely missing. " +
+        "Reference known facts naturally instead of asking the user to repeat them.",
+    };
+  }, [phase1Form, semanticTags, messages]);
+
   const send = async () => {
     const text = input.trim();
     if (!text || locked || !sessionId) return;
@@ -48,7 +83,7 @@ export function Conversation() {
     setInput("");
     setSending(true);
     try {
-      const res = await api.chat(sessionId, text);
+      const res = await api.chat(sessionId, text, chatContext ?? undefined);
       appendMessage({ role: "assistant", content: res.reply });
       if (res.status === "pending_confirmation") {
         setPendingConflict({
@@ -110,6 +145,10 @@ export function Conversation() {
           {messages.map((m, i) => (
             <MessageBubble key={i} role={m.role} content={m.content} />
           ))}
+
+          {sending && <ThinkingBubble />}
+
+
 
 
           {pendingConflict && (
