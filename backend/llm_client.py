@@ -99,24 +99,38 @@ class LLMClient:
                 print(f"LLM call failed: {e}")
                 raise
 
-    async def semantic_alignment(self, description: str) -> list[str]:
+    async def semantic_alignment(self, description: str) -> dict[str, list[str]]:
         """
-        Identify negative preferences from user description.
-        Returns list of NPP_ENUM internal keys that match.
+        Identify BOTH positive and negative property preferences.
+
+        Returns {"positive": [...PPP keys...], "negative": [...NPP keys...]}.
+        On any failure returns {"positive": [], "negative": []}.
         """
+        from positive_enum import PPP_ENUM_FULL
+
+        # Escape description so embedded quotes don't break the prompt JSON
+        safe_desc = json.dumps(description, ensure_ascii=False)
+
         messages = [
             {
                 "role": "user",
                 "content": f"""
-識別以下用戶輸入中隱含的負面房產偏好。
+從以下用戶輸入中同時識別「正面偏好」與「負面偏好」。
 
-用戶輸入："{description}"
+用戶輸入：{safe_desc}
 
-任務：僅返回以下合法標籤中符合的項目（使用內部 key）。
-合法標籤集：{list(NPP_ENUM_FULL.keys())}
+規則：
+- 「我不要 X」「沒有 X」「避免 X」→ 放入 negative
+- 「我要 X」「必須有 X」「希望 X」「需要 X」→ 放入 positive
+- 同一語義若同時被否定與肯定（如 "no west-facing, need east-facing"），各取其對應極性的 tag
+- 只能使用以下白名單 tag（內部 key）
 
-輸出格式：JSON 物件，例如 {{"tags": ["west_facing", "far_from_mrt"]}}
-若無命中，返回 {{"tags": []}}
+合法 positive tag：{list(PPP_ENUM_FULL.keys())}
+合法 negative tag：{list(NPP_ENUM_FULL.keys())}
+
+僅輸出 JSON，不要任何說明文字：
+{{"positive": ["needs_security"], "negative": ["west_facing"]}}
+若該極性無命中：對應陣列為 []。
                 """,
             }
         ]
@@ -133,15 +147,14 @@ class LLMClient:
             content = response["choices"][0]["message"]["content"]
             parsed = json.loads(content)
 
-            tags = parsed.get("tags", [])
-
-            # Validate all tags are in NPP_ENUM
-            valid_tags = [t for t in tags if t in NPP_ENUM_FULL]
-            return valid_tags
+            pos = [t for t in parsed.get("positive", []) if t in PPP_ENUM_FULL]
+            neg = [t for t in parsed.get("negative", []) if t in NPP_ENUM_FULL]
+            return {"positive": pos, "negative": neg}
 
         except Exception as e:
             print(f"Semantic alignment failed: {e}")
-            return []  # Fallback to empty
+            return {"positive": [], "negative": []}
+
 
     async def generate_remarks(
         self,

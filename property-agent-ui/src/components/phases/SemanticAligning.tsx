@@ -30,9 +30,15 @@ export function SemanticAligning() {
 
     stop = subscribeSessionReady(sessionId, (data) => {
       if (data.status === "ready") {
-        finish(data.semantic_tags ?? [], !!data.alignment_warning);
+        // Merge backend's two arrays into the prefixed shape partitionTags expects.
+        const merged = [
+          ...(data.positive_tags ?? []).map((t) => `pos:${t}`),
+          ...(data.semantic_tags ?? []).map((t) => `neg:${t}`),
+        ];
+        finish(merged, !!data.alignment_warning);
       }
     });
+
 
     fallbackTimer = setTimeout(() => {
       // Backend didn't respond in time — derive from description as warning.

@@ -15,8 +15,10 @@ class Phase1Data(BaseModel):
     identity: Literal["first_time_buyer", "investor", "upgrader"]
     gender: Literal["female", "male", "prefer_not_to_say"]
     description: str  # Added description field
-    semantic_tags: list[str] = Field(default_factory=list)
+    semantic_tags: list[str] = Field(default_factory=list)   # negative (NPP keys)
+    positive_tags: list[str] = Field(default_factory=list)   # positive (PPP keys)
     semantic_alignment_done: bool = False
+
 
 
 # ─── Dialogue ───────────────────────────────────────────────────────
@@ -116,8 +118,10 @@ class InitSessionResponse(BaseModel):
 
 class SessionReadyResponse(BaseModel):
     status: Literal["aligning", "ready"]
-    semantic_tags: Optional[list[str]] = None
+    semantic_tags: Optional[list[str]] = None     # negative (NPP keys)
+    positive_tags: Optional[list[str]] = None     # positive (PPP keys)
     alignment_warning: bool = False
+
 
 
 class ChatResponse(BaseModel):
@@ -131,7 +135,8 @@ class ChatResponse(BaseModel):
 # FIX B2: results was list[PropertyRemark] but main.py returns list[Property].
 # Aligned to actual payload shape; frontend PropertyResult is a superset and accepts both.
 class SearchStatusResponse(BaseModel):
-    status: Literal["scraping", "ranking", "generating_remarks", "complete"]
+    status: Literal["idle", "scraping", "ranking", "generating_remarks", "complete"]
+
     batch_index: Optional[int] = None
     total_available: Optional[int] = None
     has_more: Optional[bool] = None

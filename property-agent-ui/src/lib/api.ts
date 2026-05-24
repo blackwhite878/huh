@@ -14,14 +14,27 @@ import type {
 } from "./types";
 
 const BASE = (() => {
-  if (typeof import.meta !== "undefined" && import.meta.env) {
-    return (
-      (import.meta.env.VITE_API_BASE_URL as string | undefined) ??
-      "http://localhost:8000/api/v1"
+  const envBase =
+    typeof import.meta !== "undefined" && import.meta.env
+      ? (import.meta.env.VITE_API_BASE_URL as string | undefined)
+      : undefined;
+  if (envBase) return envBase;
+
+  // F-HIGH-3: hardcoded fallback is only safe in dev. In production builds
+  // missing VITE_API_BASE_URL would silently send requests to localhost,
+  // which fails (mixed-content / unreachable) without a clear error.
+  const isProd =
+    typeof import.meta !== "undefined" &&
+    import.meta.env &&
+    (import.meta.env as { PROD?: boolean }).PROD;
+  if (isProd) {
+    throw new Error(
+      "VITE_API_BASE_URL is not set. Configure it in your production env.",
     );
   }
   return "http://localhost:8000/api/v1";
 })();
+
 
 const TRANSPORT: "sse" | "polling" =
   (typeof import.meta !== "undefined" &&

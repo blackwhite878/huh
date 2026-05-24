@@ -34,6 +34,8 @@ from session_manager import (
     update_semantic_tags,
 )
 from llm_client import llm_client
+from search_pipeline import execute_search_pipeline
+
 
 # FastAPI app setup
 app = FastAPI(
@@ -58,13 +60,15 @@ app.add_middleware(
 async def async_semantic_alignment(session_id: str, description: str):
     """
     Background task: Run semantic alignment and update session.
+    semantic_alignment() now returns {"positive": [...], "negative": [...]}.
     """
     try:
-        tags = await llm_client.semantic_alignment(description)
-        update_semantic_tags(session_id, tags)
+        result = await llm_client.semantic_alignment(description)  # dict
+        update_semantic_tags(session_id, result)
     except Exception as e:
         print(f"Semantic alignment error: {e}")
-        update_semantic_tags(session_id, [])
+        update_semantic_tags(session_id, {"positive": [], "negative": []})
+
 
 
 # ─── 4.1 POST /api/v1/init_session ──────────────────────────────────
@@ -107,12 +111,14 @@ async def session_ready(session_id: str):
     if not phase1.semantic_alignment_done:
         return SessionReadyResponse(status="aligning")
 
-    alignment_warning = len(phase1.semantic_tags) == 0
+    total = len(phase1.semantic_tags) + len(phase1.positive_tags)
     return SessionReadyResponse(
         status="ready",
         semantic_tags=phase1.semantic_tags,
-        alignment_warning=alignment_warning,
+        positive_tags=phase1.positive_tags,
+        alignment_warning=(total == 0),
     )
+
 
 
 # ─── 4.3 POST /api/v1/chat ──────────────────────────────────────────
@@ -122,7 +128,8 @@ class ChatRequest(BaseModel):
 
 
 @app.post("/api/v1/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
+
     """
     Phase 2 main dialogue endpoint.
     LLM outputs structured JSON, backend parses and returns appropriate status.
@@ -213,11 +220,17 @@ async def chat(request: ChatRequest):
                 # Force trigger without more attempts
                 pass
 
+            # CRIT-1: actually kick off the search pipeline. Without this the
+            # search_session.search_stage stays "idle" forever and the
+            # frontend Searching page hangs.
+            background_tasks.add_task(execute_search_pipeline, request.session_id)
+
             return ChatResponse(
                 status="searching",
                 reply=llm_output.reply,
                 fc_attempt=attempts,
             )
+
 
         return ChatResponse(
             status="chatting",
@@ -263,7 +276,10 @@ async def search_status(session_id: str):
             results=batch_results,
         )
 
-    return SearchStatusResponse(status="scraping")
+    # CRIT-2: when stage is "idle" (pipeline not yet scheduled), report idle
+    # truthfully instead of pretending to scrape.
+    return SearchStatusResponse(status="idle")
+
 
 
 # ─── 4.5 POST /api/v1/next_batch ────────────────────────────────────

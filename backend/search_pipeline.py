@@ -73,15 +73,12 @@ async def execute_search_pipeline(session_id: str) -> tuple[list[PropertyRemark]
     search_session.tier2_pool = tier2
 
     # Step 3: Math weighting to Top 10
-    dynamic_weights = apply_dynamic_weights(
-        apply_dynamic_weights.__globals__["BASE_WEIGHT_VECTOR"],
-        phase1.gender,
-        phase1.identity,
-    )
-
-    # Import BASE_WEIGHT_VECTOR properly
+    # HIGH-3: previous code called apply_dynamic_weights twice using a
+    # __globals__ lookup as a hack to dodge the import; the first result was
+    # immediately discarded. Use the real import and call it once.
     from weighting import BASE_WEIGHT_VECTOR
     dynamic_weights = apply_dynamic_weights(BASE_WEIGHT_VECTOR, phase1.gender, phase1.identity)
+
 
     scored_results = build_top10(tier1, tier2, dynamic_weights)
 

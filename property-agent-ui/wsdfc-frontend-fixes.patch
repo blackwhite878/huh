@@ -1,0 +1,1335 @@
+diff --git a/property-agent-ui/src/components/phases/Conversation.tsx b/property-agent-ui/src/components/phases/Conversation.tsx
+index 76efb94..8cbbe8f 100644
+--- a/property-agent-ui/src/components/phases/Conversation.tsx
++++ b/property-agent-ui/src/components/phases/Conversation.tsx
+@@ -16,6 +16,7 @@ export function Conversation() {
+   const [input, setInput] = useState("");
+   const [sending, setSending] = useState(false);
+   const endRef = useRef<HTMLDivElement>(null);
++  const greetedRef = useRef(false);
+ 
+   const locked =
+     appState === "SEARCHING" || appState === "SEMANTIC_ALIGNING" || sending;
+@@ -24,14 +25,18 @@ export function Conversation() {
+     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+   }, [messages.length, pendingConflict]);
+ 
+-  // Seed with greeting once
++  // Seed with greeting once (guard against StrictMode double-invoke)
+   useEffect(() => {
++    if (greetedRef.current) return;
+     if (messages.length === 0) {
++      greetedRef.current = true;
+       appendMessage({
+         role: "assistant",
+         content:
+           "Hi — I have your profile ready. Tell me a little more about the home you have in mind. Anything specific about location, layout, or lifestyle?",
+       });
++    } else {
++      greetedRef.current = true;
+     }
+     // eslint-disable-next-line react-hooks/exhaustive-deps
+   }, []);
+diff --git a/property-agent-ui/src/components/phases/Phase1Form.tsx b/property-agent-ui/src/components/phases/Phase1Form.tsx
+deleted file mode 100644
+index d478a13..0000000
+--- a/property-agent-ui/src/components/phases/Phase1Form.tsx
++++ /dev/null
+@@ -1,186 +0,0 @@
+-/**
+- * Phase 1 Form Component - Profiling/Semantic Alignment Phase
+- * Collects user requirements and launches async semantic alignment
+- */
+-
+-import { useState } from "react";
+-import { useAppStore } from "@/lib/store";
+-import { useSemanticAlignment } from "@/hooks/use-api";
+-import { apiClient } from "@/lib/api-client";
+-import type { Phase1Form } from "@/lib/types";
+-import { Button } from "@/components/ui/button";
+-import { Input } from "@/components/ui/input";
+-import { Label } from "@/components/ui/label";
+-import {
+-  Select,
+-  SelectContent,
+-  SelectItem,
+-  SelectTrigger,
+-  SelectValue,
+-} from "@/components/ui/select";
+-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+-
+-export function Phase1FormComponent() {
+-  const { setSessionId, setPhase1Form, setAppState } = useAppStore();
+-  const [loading, setLoading] = useState(false);
+-  const [formData, setFormData] = useState<Phase1Form>({
+-    budget: 500000,
+-    agent_style: "professional",
+-    target: "condo in Johor Bahru",
+-    identity: "first_time_buyer",
+-    gender: "prefer_not_to_say",
+-    description: "",
+-  });
+-
+-  const handleInputChange = (field: keyof Phase1Form, value: any) => {
+-    setFormData((prev) => ({ ...prev, [field]: value }));
+-  };
+-
+-  const handleSubmit = async (e: React.FormEvent) => {
+-    e.preventDefault();
+-    setLoading(true);
+-
+-    try {
+-      // Initialize session - async launches semantic alignment
+-      const response = await apiClient.initSession(formData);
+-      setSessionId(response.session_id);
+-      setPhase1Form(formData);
+-
+-      // Transition to semantic alignment polling state
+-      setAppState("SEMANTIC_ALIGNING");
+-
+-      // useSemanticAlignment hook will handle polling
+-    } catch (error) {
+-      console.error("Session init failed:", error);
+-      setLoading(false);
+-    }
+-  };
+-
+-  return (
+-    <Card className="w-full max-w-2xl">
+-      <CardHeader>
+-        <CardTitle>Property Search Profile</CardTitle>
+-        <CardDescription>
+-          Tell us about your ideal property and preferences
+-        </CardDescription>
+-      </CardHeader>
+-      <CardContent>
+-        <form onSubmit={handleSubmit} className="space-y-6">
+-          {/* Budget */}
+-          <div className="space-y-2">
+-            <Label htmlFor="budget">Budget (MYR)</Label>
+-            <Input
+-              id="budget"
+-              type="number"
+-              value={formData.budget}
+-              onChange={(e) => handleInputChange("budget", Number(e.target.value))}
+-              placeholder="500000"
+-            />
+-          </div>
+-
+-          {/* Target */}
+-          <div className="space-y-2">
+-            <Label htmlFor="target">Target Property</Label>
+-            <Input
+-              id="target"
+-              value={formData.target}
+-              onChange={(e) => handleInputChange("target", e.target.value)}
+-              placeholder="e.g., condo in Johor Bahru"
+-            />
+-          </div>
+-
+-          {/* Agent Style */}
+-          <div className="space-y-2">
+-            <Label>Agent Style</Label>
+-            <Select
+-              value={formData.agent_style}
+-              onValueChange={(value) => handleInputChange("agent_style", value)}
+-            >
+-              <SelectTrigger>
+-                <SelectValue />
+-              </SelectTrigger>
+-              <SelectContent>
+-                <SelectItem value="professional">Professional</SelectItem>
+-                <SelectItem value="friendly">Friendly</SelectItem>
+-                <SelectItem value="active">Active</SelectItem>
+-              </SelectContent>
+-            </Select>
+-          </div>
+-
+-          {/* Identity */}
+-          <div className="space-y-2">
+-            <Label>Buyer Profile</Label>
+-            <RadioGroup
+-              value={formData.identity}
+-              onValueChange={(value) => handleInputChange("identity", value)}
+-            >
+-              <div className="flex items-center space-x-2">
+-                <RadioGroupItem value="first_time_buyer" id="first_time" />
+-                <Label htmlFor="first_time" className="font-normal cursor-pointer">
+-                  First Time Buyer
+-                </Label>
+-              </div>
+-              <div className="flex items-center space-x-2">
+-                <RadioGroupItem value="investor" id="investor" />
+-                <Label htmlFor="investor" className="font-normal cursor-pointer">
+-                  Investor
+-                </Label>
+-              </div>
+-              <div className="flex items-center space-x-2">
+-                <RadioGroupItem value="upgrader" id="upgrader" />
+-                <Label htmlFor="upgrader" className="font-normal cursor-pointer">
+-                  Upgrader
+-                </Label>
+-              </div>
+-            </RadioGroup>
+-          </div>
+-
+-          {/* Gender */}
+-          <div className="space-y-2">
+-            <Label>Gender (Optional)</Label>
+-            <RadioGroup
+-              value={formData.gender}
+-              onValueChange={(value) => handleInputChange("gender", value)}
+-            >
+-              <div className="flex items-center space-x-2">
+-                <RadioGroupItem value="female" id="female" />
+-                <Label htmlFor="female" className="font-normal cursor-pointer">
+-                  Female
+-                </Label>
+-              </div>
+-              <div className="flex items-center space-x-2">
+-                <RadioGroupItem value="male" id="male" />
+-                <Label htmlFor="male" className="font-normal cursor-pointer">
+-                  Male
+-                </Label>
+-              </div>
+-              <div className="flex items-center space-x-2">
+-                <RadioGroupItem value="prefer_not_to_say" id="prefer_not" />
+-                <Label htmlFor="prefer_not" className="font-normal cursor-pointer">
+-                  Prefer Not to Say
+-                </Label>
+-              </div>
+-            </RadioGroup>
+-          </div>
+-
+-          {/* Description */}
+-          <div className="space-y-2">
+-            <Label htmlFor="description">Additional Preferences</Label>
+-            <Input
+-              id="description"
+-              value={formData.description}
+-              onChange={(e) => handleInputChange("description", e.target.value)}
+-              placeholder="e.g., near school, low maintenance fees"
+-            />
+-          </div>
+-
+-          <Button type="submit" className="w-full" disabled={loading}>
+-            {loading ? "Initializing..." : "Start Search"}
+-          </Button>
+-        </form>
+-      </CardContent>
+-    </Card>
+-  );
+-}
+-
+diff --git a/property-agent-ui/src/components/phases/Phase2Chat.tsx b/property-agent-ui/src/components/phases/Phase2Chat.tsx
+deleted file mode 100644
+index 18a4aa7..0000000
+--- a/property-agent-ui/src/components/phases/Phase2Chat.tsx
++++ /dev/null
+@@ -1,190 +0,0 @@
+-/**
+- * Phase 2 Chat Component - Multi-round dialogue with conflict detection
+- * Handles chatting, pending confirmation, and search triggering
+- */
+-
+-import { useState, useEffect, useRef } from "react";
+-import { useAppStore } from "@/lib/store";
+-import { apiClient } from "@/lib/api-client";
+-import type { DialogueMessage } from "@/lib/types";
+-import { Button } from "@/components/ui/button";
+-import { Input } from "@/components/ui/input";
+-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
+-import { Loader2 } from "lucide-react";
+-
+-export function Phase2ChatComponent() {
+-  const {
+-    sessionId,
+-    dialogueMessages,
+-    appendMessage,
+-    pendingConflict,
+-    setPendingConflict,
+-    setAppState,
+-  } = useAppStore();
+-
+-  const [inputValue, setInputValue] = useState("");
+-  const [loading, setLoading] = useState(false);
+-  const [showConfirmation, setShowConfirmation] = useState(false);
+-  const messagesEndRef = useRef<HTMLDivElement>(null);
+-
+-  // Auto-scroll to bottom
+-  useEffect(() => {
+-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+-  }, [dialogueMessages]);
+-
+-  const handleSendMessage = async (e: React.FormEvent) => {
+-    e.preventDefault();
+-    if (!inputValue.trim() || !sessionId) return;
+-
+-    setLoading(true);
+-    const userMessage = inputValue.trim();
+-    setInputValue("");
+-
+-    // Add user message to UI
+-    appendMessage({
+-      role: "user",
+-      content: userMessage,
+-      timestamp: Date.now(),
+-    });
+-
+-    try {
+-      const response = await apiClient.chat(sessionId, userMessage);
+-
+-      // Add assistant response
+-      appendMessage({
+-        role: "agent",
+-        content: response.reply,
+-        timestamp: Date.now(),
+-      });
+-
+-      // Handle different response statuses
+-      if (response.status === "pending_confirmation") {
+-        // Conflict detected - show confirmation dialog
+-        setPendingConflict({
+-          conflicting_field: response.conflicting_field || "",
+-          proposed_value: response.proposed_value,
+-          reply: response.reply,
+-        });
+-        setShowConfirmation(true);
+-      } else if (response.status === "searching") {
+-        // FC triggered - transition to search state
+-        setAppState("SEARCHING");
+-      }
+-      // else: status === "chatting" - continue conversation
+-    } catch (error) {
+-      console.error("Chat error:", error);
+-      appendMessage({
+-        role: "system",
+-        content: "Sorry, an error occurred. Please try again.",
+-        timestamp: Date.now(),
+-      });
+-    } finally {
+-      setLoading(false);
+-    }
+-  };
+-
+-  const handleConfirmConflict = async (confirmed: boolean) => {
+-    if (!sessionId || !pendingConflict) return;
+-
+-    setShowConfirmation(false);
+-
+-    if (confirmed) {
+-      // User confirmed the change - update requirements and proceed
+-      try {
+-        await apiClient.updateRequirements(sessionId, {
+-          [pendingConflict.conflicting_field]: pendingConflict.proposed_value,
+-        });
+-        appendMessage({
+-          role: "system",
+-          content: `Updated ${pendingConflict.conflicting_field} to ${pendingConflict.proposed_value}`,
+-          timestamp: Date.now(),
+-        });
+-      } catch (error) {
+-        console.error("Update failed:", error);
+-      }
+-    } else {
+-      // User rejected the change
+-      appendMessage({
+-        role: "system",
+-        content: `Kept original value for ${pendingConflict.conflicting_field}`,
+-        timestamp: Date.now(),
+-      });
+-    }
+-
+-    setPendingConflict(null);
+-  };
+-
+-  return (
+-    <div className="w-full max-w-2xl space-y-4">
+-      {/* Chat Messages */}
+-      <Card className="h-96 flex flex-col">
+-        <CardHeader>
+-          <CardTitle>Chat with Agent</CardTitle>
+-        </CardHeader>
+-        <CardContent className="flex-1 overflow-y-auto space-y-4 mb-4">
+-          {dialogueMessages.map((msg, idx) => (
+-            <div
+-              key={idx}
+-              className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
+-            >
+-              <div
+-                className={`max-w-xs px-4 py-2 rounded-lg ${
+-                  msg.role === "user"
+-                    ? "bg-blue-500 text-white"
+-                    : "bg-gray-200 text-black"
+-                }`}
+-              >
+-                <p className="text-sm">{msg.content}</p>
+-              </div>
+-            </div>
+-          ))}
+-          <div ref={messagesEndRef} />
+-        </CardContent>
+-      </Card>
+-
+-      {/* Input Form */}
+-      <form onSubmit={handleSendMessage} className="flex gap-2">
+-        <Input
+-          value={inputValue}
+-          onChange={(e) => setInputValue(e.target.value)}
+-          placeholder="Type your message..."
+-          disabled={loading}
+-        />
+-        <Button type="submit" disabled={loading || !inputValue.trim()}>
+-          {loading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+-          Send
+-        </Button>
+-      </form>
+-
+-      {/* Conflict Confirmation Dialog */}
+-      <AlertDialog open={showConfirmation} onOpenChange={setShowConfirmation}>
+-        <AlertDialogContent>
+-          <AlertDialogHeader>
+-            <AlertDialogTitle>Confirm Change</AlertDialogTitle>
+-            <AlertDialogDescription>
+-              {pendingConflict?.reply}
+-            </AlertDialogDescription>
+-          </AlertDialogHeader>
+-          <div className="bg-gray-100 p-4 rounded">
+-            <p className="text-sm">
+-              <strong>Field:</strong> {pendingConflict?.conflicting_field}
+-            </p>
+-            <p className="text-sm">
+-              <strong>New Value:</strong> {String(pendingConflict?.proposed_value)}
+-            </p>
+-          </div>
+-          <div className="flex gap-3">
+-            <AlertDialogCancel onClick={() => handleConfirmConflict(false)}>
+-              Cancel
+-            </AlertDialogCancel>
+-            <AlertDialogAction onClick={() => handleConfirmConflict(true)}>
+-              Confirm
+-            </AlertDialogAction>
+-          </div>
+-        </AlertDialogContent>
+-      </AlertDialog>
+-    </div>
+-  );
+-}
+-
+diff --git a/property-agent-ui/src/components/phases/PhaseOneForm.tsx b/property-agent-ui/src/components/phases/PhaseOneForm.tsx
+index 05a9ff4..da85daf 100644
+--- a/property-agent-ui/src/components/phases/PhaseOneForm.tsx
++++ b/property-agent-ui/src/components/phases/PhaseOneForm.tsx
+@@ -35,6 +35,7 @@ export function PhaseOneForm() {
+   const setPhase1Form = useAppStore((s) => s.setPhase1Form);
+   const setAppState = useAppStore((s) => s.setAppState);
+   const [submitting, setSubmitting] = useState(false);
++  const [error, setError] = useState<string | null>(null);
+   const [form, setForm] = useState<Phase1Form>({
+     budget: 500000,
+     agent_style: "professional",
+@@ -52,6 +53,7 @@ export function PhaseOneForm() {
+   const submit = async () => {
+     if (!valid || submitting) return;
+     setSubmitting(true);
++    setError(null);
+     try {
+       setPhase1Form(form);
+       const res = await api.initSession(form);
+@@ -59,9 +61,11 @@ export function PhaseOneForm() {
+       setAppState("SEMANTIC_ALIGNING");
+     } catch (e) {
+       console.error(e);
+-      // UI shell: even if API fails, still transition so flow can be inspected
+-      setSessionId(crypto.randomUUID());
+-      setAppState("SEMANTIC_ALIGNING");
++      setError(
++        e instanceof Error
++          ? `Couldn't reach the agent backend: ${e.message}`
++          : "Couldn't reach the agent backend. Please try again.",
++      );
+     } finally {
+       setSubmitting(false);
+     }
+@@ -204,6 +208,12 @@ export function PhaseOneForm() {
+           </div>
+         </div>
+ 
++        {error && (
++          <div className="border-t border-destructive/40 bg-destructive/10 px-8 py-3 text-sm text-destructive md:px-10">
++            {error}
++          </div>
++        )}
++
+         <div className="flex items-center justify-between gap-4 border-t border-border/60 bg-surface/40 px-8 py-5 md:px-10">
+           <div className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+             <Building2 className="h-3.5 w-3.5" />
+diff --git a/property-agent-ui/src/components/phases/ResultsBatch.tsx b/property-agent-ui/src/components/phases/ResultsBatch.tsx
+index dad7e90..316dedf 100644
+--- a/property-agent-ui/src/components/phases/ResultsBatch.tsx
++++ b/property-agent-ui/src/components/phases/ResultsBatch.tsx
+@@ -21,10 +21,12 @@ export function ResultsBatch() {
+   const hasMore = useAppStore((s) => s.hasMore);
+   const totalAvailable = useAppStore((s) => s.totalAvailable);
+   const rejectionCount = useAppStore((s) => s.rejectionCount);
++  const rejectedIds = useAppStore((s) => s.rejectedIds);
+   const degraded = useAppStore((s) => s.degraded);
+   const batchIndex = useAppStore((s) => s.batchIndex);
+   const setResults = useAppStore((s) => s.setResults);
+   const setRejectionCount = useAppStore((s) => s.setRejectionCount);
++  const addRejectedId = useAppStore((s) => s.addRejectedId);
+   const setAppState = useAppStore((s) => s.setAppState);
+ 
+   const fetchNext = async () => {
+@@ -40,12 +42,18 @@ export function ResultsBatch() {
+ 
+   const reject = async (propertyId: string, reason: string) => {
+     if (!sessionId) return;
++    // Optimistically mark rejected so UI stays in sync with store.
++    addRejectedId(propertyId);
+     try {
+       const data = await api.rejectSingle(sessionId, propertyId, reason);
+       setRejectionCount(data.rejection_count);
+-      if (data.rejection_count === totalAvailable) {
++      if (data.rejection_count >= totalAvailable && totalAvailable > 0) {
+         setAppState("ALL_REJECTED");
+-        await api.rejectAll(sessionId);
++        try {
++          await api.rejectAll(sessionId);
++        } catch (e) {
++          console.warn("[rejectAll] failed", e);
++        }
+         setAppState("ACTION_REQUIRED_UI");
+       }
+     } catch (e) {
+@@ -95,6 +103,7 @@ export function ResultsBatch() {
+             key={p.property_id}
+             property={p}
+             degraded={degraded}
++            rejected={rejectedIds.includes(p.property_id)}
+             onReject={reject}
+           />
+         ))}
+@@ -118,15 +127,16 @@ export function ResultsBatch() {
+ function PropertyCard({
+   property,
+   degraded,
++  rejected,
+   onReject,
+ }: {
+   property: PropertyResult;
+   degraded: boolean;
++  rejected: boolean;
+   onReject: (id: string, reason: string) => void;
+ }) {
+   const [open, setOpen] = useState(false);
+   const [reason, setReason] = useState("");
+-  const [rejected, setRejected] = useState(false);
+ 
+   if (rejected) {
+     return (
+@@ -256,7 +266,7 @@ function PropertyCard({
+                 onClick={() => {
+                   if (!reason.trim()) return;
+                   onReject(property.property_id, reason);
+-                  setRejected(true);
++                  setOpen(false);
+                 }}
+                 className="h-8 rounded-lg bg-foreground text-background"
+               >
+diff --git a/property-agent-ui/src/components/phases/ResultsDisplay.tsx b/property-agent-ui/src/components/phases/ResultsDisplay.tsx
+deleted file mode 100644
+index 49c3a2d..0000000
+--- a/property-agent-ui/src/components/phases/ResultsDisplay.tsx
++++ /dev/null
+@@ -1,235 +0,0 @@
+-/**
+- * Results Display Component - Shows property batch results
+- * Handles rejection, next batch fetch, and tier display
+- */
+-
+-import { useState } from "react";
+-import { useAppStore } from "@/lib/store";
+-import { usePropertyRejection, useNPPLearning, useNextBatch } from "@/hooks/use-api";
+-import { Button } from "@/components/ui/button";
+-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+-import { Badge } from "@/components/ui/badge";
+-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
+-import type { PropertyResult } from "@/lib/types";
+-import { ThumbsUp, ThumbsDown, MoreHorizontal } from "lucide-react";
+-
+-export function ResultsDisplayComponent() {
+-  const {
+-    sessionId,
+-    currentBatch,
+-    batchIndex,
+-    totalAvailable,
+-    hasMore,
+-    tier3Triggered,
+-    rejectionCount,
+-    setAppState,
+-  } = useAppStore();
+-
+-  const { rejectProperty } = usePropertyRejection(sessionId);
+-  const { triggerNPPLearning } = useNPPLearning(sessionId);
+-  const { fetchNextBatch } = useNextBatch(sessionId);
+-
+-  const [selectedProperty, setSelectedProperty] = useState<PropertyResult | null>(null);
+-  const [showRejectDialog, setShowRejectDialog] = useState(false);
+-  const [rejectReason, setRejectReason] = useState("");
+-  const [rejectedCount, setRejectedCount] = useState(0);
+-
+-  if (tier3Triggered) {
+-    return (
+-      <Card className="w-full max-w-2xl">
+-        <CardHeader>
+-          <CardTitle>No Results Found</CardTitle>
+-          <CardDescription>
+-            We couldn't find any properties matching your criteria even after expanding the search area.
+-          </CardDescription>
+-        </CardHeader>
+-        <CardContent>
+-          <Button onClick={() => setAppState("ACTION_REQUIRED_UI")}>
+-            Adjust Preferences
+-          </Button>
+-        </CardContent>
+-      </Card>
+-    );
+-  }
+-
+-  const handleReject = async () => {
+-    if (!selectedProperty || !rejectReason.trim() || !sessionId) return;
+-
+-    await rejectProperty(selectedProperty.property_id, rejectReason);
+-    setRejectedCount((prev) => prev + 1);
+-    setShowRejectDialog(false);
+-    setRejectReason("");
+-    setSelectedProperty(null);
+-
+-    // Check if all properties in batch are rejected
+-    if (rejectedCount + 1 >= currentBatch.length) {
+-      // All rejected - trigger NPP learning
+-      await triggerNPPLearning();
+-    }
+-  };
+-
+-  const handleNextBatch = async () => {
+-    await fetchNextBatch();
+-  };
+-
+-  return (
+-    <div className="w-full space-y-4">
+-      {/* Batch Info */}
+-      <div className="text-sm text-gray-600">
+-        Batch {batchIndex} of {Math.ceil(totalAvailable / 5)} |
+-        {totalAvailable} total available
+-      </div>
+-
+-      {/* Property Cards */}
+-      <div className="grid gap-4">
+-        {currentBatch.map((property) => (
+-          <PropertyCard
+-            key={property.property_id}
+-            property={property}
+-            onReject={(prop) => {
+-              setSelectedProperty(prop);
+-              setShowRejectDialog(true);
+-            }}
+-          />
+-        ))}
+-      </div>
+-
+-      {/* Navigation */}
+-      <div className="flex gap-2 justify-between">
+-        <div>
+-          {rejectedCount > 0 && (
+-            <span className="text-sm text-gray-600">
+-              Rejected: {rejectedCount}/{currentBatch.length}
+-            </span>
+-          )}
+-        </div>
+-        <Button
+-          onClick={handleNextBatch}
+-          disabled={!hasMore}
+-          variant="outline"
+-        >
+-          {hasMore ? "Next Batch" : "No More Results"}
+-        </Button>
+-      </div>
+-
+-      {/* Reject Dialog */}
+-      <AlertDialog open={showRejectDialog} onOpenChange={setShowRejectDialog}>
+-        <AlertDialogContent>
+-          <AlertDialogHeader>
+-            <AlertDialogTitle>Reject Property</AlertDialogTitle>
+-            <AlertDialogDescription>
+-              {selectedProperty?.title}
+-            </AlertDialogDescription>
+-          </AlertDialogHeader>
+-          <div className="space-y-4">
+-            <div>
+-              <label className="text-sm font-medium">Reason for rejection</label>
+-              <input
+-                type="text"
+-                value={rejectReason}
+-                onChange={(e) => setRejectReason(e.target.value)}
+-                placeholder="e.g., too high floor, near industrial area"
+-                className="w-full mt-2 px-3 py-2 border rounded"
+-              />
+-            </div>
+-          </div>
+-          <div className="flex gap-3">
+-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+-            <AlertDialogAction onClick={handleReject}>
+-              Reject
+-            </AlertDialogAction>
+-          </div>
+-        </AlertDialogContent>
+-      </AlertDialog>
+-    </div>
+-  );
+-}
+-
+-/**
+- * Individual Property Card Component
+- */
+-function PropertyCard({
+-  property,
+-  onReject,
+-}: {
+-  property: PropertyResult;
+-  onReject: (prop: PropertyResult) => void;
+-}) {
+-  return (
+-    <Card>
+-      <CardHeader>
+-        <div className="flex justify-between items-start">
+-          <div>
+-            <CardTitle className="text-lg">{property.title}</CardTitle>
+-            <CardDescription>{property.location}</CardDescription>
+-          </div>
+-          <Badge variant={property.tier === "tier_1" ? "default" : "secondary"}>
+-            {property.tier === "tier_1" ? "Top Match" : "Alternative"}
+-          </Badge>
+-        </div>
+-      </CardHeader>
+-      <CardContent className="space-y-4">
+-        {/* Price */}
+-        <div className="flex justify-between items-center">
+-          <span className="font-semibold">MYR {property.price.toLocaleString()}</span>
+-        </div>
+-
+-        {/* Tags */}
+-        {property.feature_tags && property.feature_tags.length > 0 && (
+-          <div className="flex flex-wrap gap-1">
+-            {property.feature_tags.map((tag) => (
+-              <Badge key={tag} variant="outline" className="text-xs">
+-                {tag}
+-              </Badge>
+-            ))}
+-          </div>
+-        )}
+-
+-        {/* AI Remarks */}
+-        {property.ai_remarks && (
+-          <div className="bg-blue-50 p-3 rounded text-sm">
+-            <p className="text-gray-700">{property.ai_remarks}</p>
+-          </div>
+-        )}
+-
+-        {/* Missing Features (Tier 2) */}
+-        {property.missing_features && property.missing_features.length > 0 && (
+-          <div className="bg-yellow-50 p-3 rounded text-sm">
+-            <p className="font-medium text-yellow-900 mb-1">Missing Features:</p>
+-            <ul className="list-disc list-inside text-yellow-800">
+-              {property.missing_features.map((feat, idx) => (
+-                <li key={idx}>{feat}</li>
+-              ))}
+-            </ul>
+-            {property.remedy && (
+-              <p className="mt-2 text-yellow-800">
+-                <strong>Remedy:</strong> {property.remedy}
+-              </p>
+-            )}
+-          </div>
+-        )}
+-
+-        {/* Actions */}
+-        <div className="flex gap-2 pt-2">
+-          <Button
+-            size="sm"
+-            variant="outline"
+-            className="flex-1"
+-            onClick={() => onReject(property)}
+-          >
+-            <ThumbsDown className="mr-1 h-4 w-4" />
+-            Not Interested
+-          </Button>
+-          {property.url && (
+-            <Button size="sm" variant="outline" asChild>
+-              <a href={property.url} target="_blank" rel="noopener noreferrer">
+-                <MoreHorizontal className="h-4 w-4" />
+-              </a>
+-            </Button>
+-          )}
+-        </div>
+-      </CardContent>
+-    </Card>
+-  );
+-}
+-
+diff --git a/property-agent-ui/src/components/phases/SemanticAligning.tsx b/property-agent-ui/src/components/phases/SemanticAligning.tsx
+index e4ea56f..29400b8 100644
+--- a/property-agent-ui/src/components/phases/SemanticAligning.tsx
++++ b/property-agent-ui/src/components/phases/SemanticAligning.tsx
+@@ -3,6 +3,9 @@ import { useAppStore } from "@/lib/store";
+ import { subscribeSessionReady } from "@/lib/api";
+ import { deriveTagsFromDescription } from "@/lib/semantic";
+ 
++// Backend-first. Only fall back to local regex when backend genuinely times out.
++const BACKEND_TIMEOUT_MS = 30_000;
++
+ export function SemanticAligning() {
+   const sessionId = useAppStore((s) => s.sessionId);
+   const phase1Form = useAppStore((s) => s.phase1Form);
+@@ -13,31 +16,34 @@ export function SemanticAligning() {
+   useEffect(() => {
+     if (!sessionId) return;
+     let done = false;
++    let stop: (() => void) | null = null;
++    let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
++
+     const finish = (tags: string[], warning: boolean) => {
+       if (done) return;
+       done = true;
+       setSemanticTags(tags, warning);
+       setAppState("PROFILING_COMPLETE");
+-      stop();
+-      clearTimeout(fallbackTimer);
++      stop?.();
++      if (fallbackTimer) clearTimeout(fallbackTimer);
+     };
+ 
+-    const stop = subscribeSessionReady(sessionId, (data) => {
++    stop = subscribeSessionReady(sessionId, (data) => {
+       if (data.status === "ready") {
+         finish(data.semantic_tags ?? [], !!data.alignment_warning);
+       }
+     });
+ 
+-    // Local fallback: if backend doesn't respond, derive tags from the
+-    // Phase 1 description so Profiling Complete shows real exclusions.
+-    const fallbackTimer = setTimeout(() => {
++    fallbackTimer = setTimeout(() => {
++      // Backend didn't respond in time — derive from description as warning.
+       const tags = deriveTagsFromDescription(phase1Form?.description ?? "");
+       finish(tags, true);
+-    }, 2200);
++    }, BACKEND_TIMEOUT_MS);
+ 
+     return () => {
+-      stop();
+-      clearTimeout(fallbackTimer);
++      done = true;
++      stop?.();
++      if (fallbackTimer) clearTimeout(fallbackTimer);
+     };
+   }, [sessionId, phase1Form, setSemanticTags, setAppState]);
+ 
+@@ -50,7 +56,6 @@ export function SemanticAligning() {
+ 
+   return (
+     <div className="flex min-h-[60vh] flex-col items-center justify-center text-center">
+-      {/* Pulse rings */}
+       <div className="relative mb-8 h-20 w-20">
+         <div className="pulse-ring absolute inset-0 rounded-full" />
+         <div
+@@ -68,7 +73,6 @@ export function SemanticAligning() {
+         semantic alignment · phase 1.5
+       </p>
+ 
+-      {/* Shimmer bars */}
+       <div className="mt-10 flex w-full max-w-xs flex-col gap-2">
+         {[100, 80, 60].map((w, i) => (
+           <div
+diff --git a/property-agent-ui/src/hooks/use-api.ts b/property-agent-ui/src/hooks/use-api.ts
+deleted file mode 100644
+index 9ff491f..0000000
+--- a/property-agent-ui/src/hooks/use-api.ts
++++ /dev/null
+@@ -1,196 +0,0 @@
+-/**
+- * Custom hooks for managing the search pipeline and API interactions
+- */
+-
+-import { useEffect, useCallback } from "react";
+-import { useAppStore } from "../lib/store";
+-import { apiClient } from "./api-client";
+-import type { PropertyResult } from "./types";
+-
+-/**
+- * Hook to manage semantic alignment polling
+- */
+-export function useSemanticAlignment(sessionId: string | null) {
+-  const { setSemanticTags, setAppState } = useAppStore();
+-
+-  const pollAlignment = useCallback(async () => {
+-    if (!sessionId) return;
+-
+-    try {
+-      const response = await apiClient.sessionReady(sessionId);
+-
+-      if (response.status === "ready") {
+-        setSemanticTags(response.semantic_tags || [], response.alignment_warning || false);
+-        setAppState("PROFILING_COMPLETE");
+-        return true;
+-      }
+-    } catch (error) {
+-      console.error("Alignment polling error:", error);
+-    }
+-    return false;
+-  }, [sessionId, setSemanticTags, setAppState]);
+-
+-  useEffect(() => {
+-    if (!sessionId) return;
+-
+-    const handle = setInterval(async () => {
+-      const done = await pollAlignment();
+-      if (done) {
+-        clearInterval(handle);
+-      }
+-    }, 3000);
+-
+-    return () => clearInterval(handle);
+-  }, [sessionId, pollAlignment]);
+-}
+-
+-/**
+- * Hook to manage search status polling
+- */
+-export function useSearchStatus(sessionId: string | null) {
+-  const { setResults, setSearchStage, setAppState } = useAppStore();
+-
+-  const pollSearch = useCallback(async () => {
+-    if (!sessionId) return;
+-
+-    try {
+-      const response = await apiClient.searchStatus(sessionId);
+-      setSearchStage(response.status);
+-
+-      if (response.status === "complete") {
+-        setResults({
+-          results: response.results || [],
+-          batch_index: response.batch_index || 1,
+-          total_available: response.total_available || 0,
+-          has_more: response.has_more || false,
+-          tier3_triggered: response.tier3_triggered || false,
+-          degraded: response.degraded || false,
+-        });
+-
+-        if (response.tier3_triggered) {
+-          setAppState("TIER3_NO_RESULT");
+-        } else {
+-          setAppState("BATCH_1_DISPLAY");
+-        }
+-
+-        return true;
+-      }
+-    } catch (error) {
+-      console.error("Search status polling error:", error);
+-    }
+-    return false;
+-  }, [sessionId, setResults, setSearchStage, setAppState]);
+-
+-  useEffect(() => {
+-    if (!sessionId) return;
+-
+-    const handle = setInterval(async () => {
+-      const done = await pollSearch();
+-      if (done) {
+-        clearInterval(handle);
+-      }
+-    }, 3000);
+-
+-    return () => clearInterval(handle);
+-  }, [sessionId, pollSearch]);
+-}
+-
+-/**
+- * Hook to handle property rejection
+- */
+-export function usePropertyRejection(sessionId: string | null) {
+-  const { setRejectionCount } = useAppStore();
+-
+-  const rejectProperty = useCallback(
+-    async (propertyId: string, reason: string) => {
+-      if (!sessionId) return;
+-
+-      try {
+-        const response = await apiClient.rejectSingle(sessionId, propertyId, reason);
+-        setRejectionCount(response.rejection_count);
+-      } catch (error) {
+-        console.error("Rejection error:", error);
+-      }
+-    },
+-    [sessionId, setRejectionCount]
+-  );
+-
+-  return { rejectProperty };
+-}
+-
+-/**
+- * Hook to trigger NPP learning and action required flow
+- */
+-export function useNPPLearning(sessionId: string | null) {
+-  const { setAppState } = useAppStore();
+-
+-  const triggerNPPLearning = useCallback(async () => {
+-    if (!sessionId) return;
+-
+-    try {
+-      await apiClient.rejectAll(sessionId);
+-      setAppState("ACTION_REQUIRED_UI");
+-    } catch (error) {
+-      console.error("NPP learning error:", error);
+-    }
+-  }, [sessionId, setAppState]);
+-
+-  return { triggerNPPLearning };
+-}
+-
+-/**
+- * Hook to resolve action required (New Prompt or Keep Memories)
+- */
+-export function useActionResolution(sessionId: string | null) {
+-  const { setAppState, resetAll, resetForKeepMemories } = useAppStore();
+-
+-  const resolveAction = useCallback(
+-    async (action: "new_prompt" | "keep_memories") => {
+-      if (!sessionId) return;
+-
+-      try {
+-        await apiClient.resolveAction(sessionId, action);
+-
+-        if (action === "new_prompt") {
+-          resetAll();
+-          setAppState("PHASE_1_INITIAL");
+-        } else {
+-          resetForKeepMemories();
+-          setAppState("CHATTING");
+-        }
+-      } catch (error) {
+-        console.error("Action resolution error:", error);
+-      }
+-    },
+-    [sessionId, setAppState, resetAll, resetForKeepMemories]
+-  );
+-
+-  return { resolveAction };
+-}
+-
+-/**
+- * Hook to fetch next batch of properties
+- */
+-export function useNextBatch(sessionId: string | null) {
+-  const { batchIndex, setResults } = useAppStore();
+-
+-  const fetchNextBatch = useCallback(async () => {
+-    if (!sessionId) return;
+-
+-    try {
+-      const response = await apiClient.nextBatch(sessionId);
+-      setResults({
+-        results: response.results,
+-        batch_index: response.batch_index,
+-        total_available: response.total_available,
+-        has_more: response.has_more,
+-        tier3_triggered: response.tier3_triggered,
+-        degraded: response.degraded,
+-      });
+-    } catch (error) {
+-      console.error("Next batch error:", error);
+-    }
+-  }, [sessionId, setResults]);
+-
+-  return { fetchNextBatch };
+-}
+diff --git a/property-agent-ui/src/lib/api-client.ts b/property-agent-ui/src/lib/api-client.ts
+deleted file mode 100644
+index f447443..0000000
+--- a/property-agent-ui/src/lib/api-client.ts
++++ /dev/null
+@@ -1,189 +0,0 @@
+-/**
+- * API Client - Frontend integration with backend endpoints
+- * All requests use the /api/v1 base path
+- */
+-
+-import type {
+-  Phase1Form,
+-  InitSessionResponse,
+-  SessionReadyResponse,
+-  ChatResponse,
+-  SearchStatusResponse,
+-  NextBatchResponse,
+-  RejectSingleResponse,
+-  RejectAllResponse,
+-  ActionResolveResponse,
+-  PropertyDetailResponse,
+-  UpdateRequirementsRequest,
+-  UpdateRequirementsResponse,
+-} from "./types";
+-
+-const API_BASE_URL = process.env.VITE_API_URL || "http://localhost:8000";
+-
+-export const apiClient = {
+-  /**
+-   * 4.1 Initialize session with Phase 1 data
+-   * Async launch semantic alignment, return immediately
+-   */
+-  async initSession(phase1Data: Phase1Form): Promise<InitSessionResponse> {
+-    const response = await fetch(`${API_BASE_URL}/api/v1/init_session`, {
+-      method: "POST",
+-      headers: { "Content-Type": "application/json" },
+-      body: JSON.stringify({
+-        budget: phase1Data.budget,
+-        agent_style: phase1Data.agent_style,
+-        target: phase1Data.target,
+-        identity: phase1Data.identity,
+-        gender: phase1Data.gender,
+-      }),
+-    });
+-    if (!response.ok) throw new Error(`Init failed: ${response.statusText}`);
+-    return response.json();
+-  },
+-
+-  /**
+-   * 4.2 Poll semantic alignment completion
+-   */
+-  async sessionReady(sessionId: string): Promise<SessionReadyResponse> {
+-    const response = await fetch(
+-      `${API_BASE_URL}/api/v1/session_ready/${sessionId}`
+-    );
+-    if (!response.ok) throw new Error(`Session ready check failed`);
+-    return response.json();
+-  },
+-
+-  /**
+-   * 4.3 Send chat message for Phase 2 dialogue
+-   */
+-  async chat(
+-    sessionId: string,
+-    message: string
+-  ): Promise<ChatResponse> {
+-    const response = await fetch(`${API_BASE_URL}/api/v1/chat`, {
+-      method: "POST",
+-      headers: { "Content-Type": "application/json" },
+-      body: JSON.stringify({
+-        session_id: sessionId,
+-        message,
+-      }),
+-    });
+-    if (!response.ok) throw new Error(`Chat failed: ${response.statusText}`);
+-    return response.json();
+-  },
+-
+-  /**
+-   * 4.4 Poll search pipeline progress
+-   */
+-  async searchStatus(sessionId: string): Promise<SearchStatusResponse> {
+-    const response = await fetch(
+-      `${API_BASE_URL}/api/v1/search_status/${sessionId}`
+-    );
+-    if (!response.ok) throw new Error(`Search status check failed`);
+-    return response.json();
+-  },
+-
+-  /**
+-   * 4.5 Fetch next batch of 5 properties
+-   */
+-  async nextBatch(sessionId: string): Promise<NextBatchResponse> {
+-    const response = await fetch(`${API_BASE_URL}/api/v1/next_batch`, {
+-      method: "POST",
+-      headers: { "Content-Type": "application/json" },
+-      body: JSON.stringify({ session_id: sessionId }),
+-    });
+-    if (!response.ok) throw new Error(`Next batch failed`);
+-    return response.json();
+-  },
+-
+-  /**
+-   * 4.6 Record single property rejection
+-   */
+-  async rejectSingle(
+-    sessionId: string,
+-    propertyId: string,
+-    reason: string
+-  ): Promise<RejectSingleResponse> {
+-    const response = await fetch(`${API_BASE_URL}/api/v1/reject_single`, {
+-      method: "POST",
+-      headers: { "Content-Type": "application/json" },
+-      body: JSON.stringify({
+-        session_id: sessionId,
+-        property_id: propertyId,
+-        reason,
+-      }),
+-    });
+-    if (!response.ok) throw new Error(`Reject single failed`);
+-    return response.json();
+-  },
+-
+-  /**
+-   * 4.7 Trigger NPP learning on all rejection
+-   */
+-  async rejectAll(sessionId: string): Promise<RejectAllResponse> {
+-    const response = await fetch(`${API_BASE_URL}/api/v1/reject_all`, {
+-      method: "POST",
+-      headers: { "Content-Type": "application/json" },
+-      body: JSON.stringify({ session_id: sessionId }),
+-    });
+-    if (!response.ok) throw new Error(`Reject all failed`);
+-    return response.json();
+-  },
+-
+-  /**
+-   * 4.8 Resolve ACTION_REQUIRED_UI - New Prompt or Keep Memories
+-   */
+-  async resolveAction(
+-    sessionId: string,
+-    action: "new_prompt" | "keep_memories"
+-  ): Promise<ActionResolveResponse> {
+-    const response = await fetch(`${API_BASE_URL}/api/v1/resolve_action`, {
+-      method: "POST",
+-      headers: { "Content-Type": "application/json" },
+-      body: JSON.stringify({
+-        session_id: sessionId,
+-        action,
+-      }),
+-    });
+-    if (!response.ok) throw new Error(`Resolve action failed`);
+-    return response.json();
+-  },
+-
+-  /**
+-   * 4.9 Deep fetch property detail page
+-   */
+-  async fetchDetail(
+-    sessionId: string,
+-    propertyUrl: string
+-  ): Promise<PropertyDetailResponse> {
+-    const response = await fetch(`${API_BASE_URL}/api/v1/fetch_detail`, {
+-      method: "POST",
+-      headers: { "Content-Type": "application/json" },
+-      body: JSON.stringify({
+-        session_id: sessionId,
+-        property_url: propertyUrl,
+-      }),
+-    });
+-    if (!response.ok) throw new Error(`Fetch detail failed`);
+-    return response.json();
+-  },
+-
+-  /**
+-   * 4.10 Update Phase 1 requirements
+-   * Only clears relevant dialogue segments and NPP tags
+-   */
+-  async updateRequirements(
+-    sessionId: string,
+-    updatedFields: Record<string, any>
+-  ): Promise<UpdateRequirementsResponse> {
+-    const response = await fetch(`${API_BASE_URL}/api/v1/update_requirements`, {
+-      method: "POST",
+-      headers: { "Content-Type": "application/json" },
+-      body: JSON.stringify({
+-        session_id: sessionId,
+-        updated_fields: updatedFields,
+-      }),
+-    });
+-    if (!response.ok) throw new Error(`Update requirements failed`);
+-    return response.json();
+-  },
+-};
+diff --git a/property-agent-ui/src/lib/api.ts b/property-agent-ui/src/lib/api.ts
+index 4106e1e..0fc23fb 100644
+--- a/property-agent-ui/src/lib/api.ts
++++ b/property-agent-ui/src/lib/api.ts
+@@ -16,10 +16,11 @@ import type {
+ const BASE = (() => {
+   if (typeof import.meta !== "undefined" && import.meta.env) {
+     return (
+-      (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "/api/v1"
++      (import.meta.env.VITE_API_BASE_URL as string | undefined) ??
++      "http://localhost:8000/api/v1"
+     );
+   }
+-  return "/api/v1";
++  return "http://localhost:8000/api/v1";
+ })();
+ 
+ const TRANSPORT: "sse" | "polling" =
+@@ -102,13 +103,17 @@ function pollLoop<T>(
+   intervalMs = 3000,
+ ): Stop {
+   let cancelled = false;
++  let inFlight = false;
+   const tick = async () => {
+-    if (cancelled) return;
++    if (cancelled || inFlight) return;
++    inFlight = true;
+     try {
+       const data = await fn();
+       if (!cancelled) onData(data);
+     } catch (e) {
+       console.warn("[poll] error", e);
++    } finally {
++      inFlight = false;
+     }
+   };
+   tick();
+diff --git a/property-agent-ui/src/lib/store.ts b/property-agent-ui/src/lib/store.ts
+index 414c2e0..f4f355b 100644
+--- a/property-agent-ui/src/lib/store.ts
++++ b/property-agent-ui/src/lib/store.ts
+@@ -57,7 +57,9 @@ interface AppStore {
+ 
+   // Rejection
+   rejectionCount: number;
++  rejectedIds: string[];
+   setRejectionCount: (n: number) => void;
++  addRejectedId: (id: string) => void;
+ 
+   // Cleanup handles
+   pollHandles: ReturnType<typeof setInterval>[];
+@@ -116,7 +118,14 @@ export const useAppStore = create<AppStore>((set, get) => ({
+     }),
+ 
+   rejectionCount: 0,
++  rejectedIds: [],
+   setRejectionCount: (n) => set({ rejectionCount: n }),
++  addRejectedId: (id) =>
++    set((st) =>
++      st.rejectedIds.includes(id)
++        ? st
++        : { rejectedIds: [...st.rejectedIds, id] },
++    ),
+ 
+   pollHandles: [],
+   registerHandle: (h) =>
+@@ -138,6 +147,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
+       pendingConflict: null,
+       searchStage: null,
+       rejectionCount: 0,
++      rejectedIds: [],
+       pollHandles: [],
+       ...initialResults,
+     });
+@@ -150,6 +160,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
+       pendingConflict: null,
+       searchStage: null,
+       rejectionCount: 0,
++      rejectedIds: [],
+       pollHandles: [],
+       ...initialResults,
+     });

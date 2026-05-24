@@ -65,15 +65,31 @@ def get_search_session(session_id: str) -> Optional[SearchSession]:
     return _search_sessions.get(session_id)
 
 
-def update_semantic_tags(session_id: str, tags: list[str]) -> None:
+def update_semantic_tags(
+    session_id: str,
+    payload: "dict[str, list[str]] | list[str]",
+) -> None:
     """
     Update semantic alignment tags in dialogue session.
-    Called after async semantic_alignment() completes.
+
+    Accepts either:
+      - new shape: {"positive": [...], "negative": [...]}
+      - legacy shape: list[str] (treated as negative only)
     """
     dialogue_session = get_dialogue_session(session_id)
-    if dialogue_session:
-        dialogue_session.phase1_data.semantic_tags = tags
-        dialogue_session.phase1_data.semantic_alignment_done = True
+    if not dialogue_session:
+        return
+
+    if isinstance(payload, list):
+        positive, negative = [], list(payload)
+    else:
+        positive = list(payload.get("positive", []))
+        negative = list(payload.get("negative", []))
+
+    dialogue_session.phase1_data.semantic_tags = negative
+    dialogue_session.phase1_data.positive_tags = positive
+    dialogue_session.phase1_data.semantic_alignment_done = True
+
 
 
 def reset_dialogue_session(session_id: str) -> None:
@@ -100,9 +116,21 @@ def reset_npp_session(session_id: str) -> None:
 def reset_search_session(session_id: str):
     """
     Resets the search session for a given session_id.
+    Re-seeds current_budget_range from the dialogue Phase1 budget so the
+    next search does NOT filter with the {0, 0} default (HIGH-5).
     """
     if session_id in _search_sessions:
-        _search_sessions[session_id] = SearchSession(session_id=session_id)
+        new_session = SearchSession(session_id=session_id)
+        dialogue_session = get_dialogue_session(session_id)
+        if dialogue_session:
+            budget = float(dialogue_session.phase1_data.budget or 0)
+            if budget > 0:
+                new_session.current_budget_range = {
+                    "min": budget * 0.9,
+                    "max": budget * 1.1,
+                }
+        _search_sessions[session_id] = new_session
+
 
 
 def reset_all_sessions(session_id: str) -> None:
@@ -154,6 +182,9 @@ def record_rejection(session_id: str, property_id: str, reason: str) -> None:
     npp_session = get_npp_session(session_id)
 
     if search_session:
+        # HIGH-7: dedupe; double-clicks must not inflate rejection_count.
+        if property_id in search_session.rejected_property_ids:
+            return
         search_session.rejected_property_ids.append(property_id)
 
     if npp_session:
@@ -166,6 +197,7 @@ def record_rejection(session_id: str, property_id: str, reason: str) -> None:
             "content": reason,
             "timestamp": timestamp,
         }
+
 
 
 def update_npp_tags(session_id: str, new_tags: list[str]) -> None:

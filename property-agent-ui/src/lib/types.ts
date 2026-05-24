@@ -22,10 +22,12 @@ export type AgentStyle = "professional" | "friendly" | "active";
 export type Identity = "first_time_buyer" | "investor" | "upgrader";
 export type Gender = "female" | "male" | "prefer_not_to_say";
 export type SearchStage =
+  | "idle"
   | "scraping"
   | "ranking"
   | "generating_remarks"
   | "complete";
+
 
 export interface Phase1Form {
   budget: number;
@@ -70,9 +72,11 @@ export interface InitSessionResponse {
 
 export interface SessionReadyResponse {
   status: "aligning" | "ready";
-  semantic_tags?: string[];
+  semantic_tags?: string[];   // negative (NPP keys)
+  positive_tags?: string[];   // positive (PPP keys)
   alignment_warning?: boolean;
 }
+
 
 export interface ChatResponse {
   status: "chatting" | "pending_confirmation" | "searching";
