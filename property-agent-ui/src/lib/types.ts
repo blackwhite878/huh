@@ -36,6 +36,10 @@ export interface Phase1Form {
   identity: Identity;
   gender: Gender;
   description: string;
+  // Backend-only payload fields. No Phase 1 UI input today; default to "" so
+  // the backend always receives a stable string contract.
+  house_type: string;
+  location: string;
 }
 
 // Aligned to backend DialogueMessage.role contract (user | assistant only)

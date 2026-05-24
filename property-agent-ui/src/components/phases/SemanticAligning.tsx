@@ -4,6 +4,17 @@ import { subscribeSessionReady } from "@/lib/api";
 import { deriveTagsFromDescription } from "@/lib/semantic";
 import { FloatingTags } from "./FloatingTags";
 
+// Verbs cycled in the "thinking word" chip. Pure UX — not driven by the
+// backend. Five phrases × ~1.2s slot each = one 6s loop, matched to the
+// .think-word keyframes in styles.css.
+const THINKING_WORDS = [
+  "Thinking",
+  "Aligning",
+  "Parsing",
+  "Cross-referencing",
+  "Drafting",
+];
+
 // Backend is authoritative. The local-derived path is a UI placeholder ONLY —
 // even after it runs, a subsequent backend "ready" event will overwrite it.
 const LOCAL_PLACEHOLDER_AFTER_MS = 60_000;
@@ -62,6 +73,27 @@ export function SemanticAligning() {
   return (
     <div className="relative flex min-h-[60vh] flex-col items-center justify-center text-center">
       <FloatingTags />
+      {/* Animated "thinking word" chip — cycles verbs while the backend works. */}
+      <div
+        aria-live="polite"
+        className="relative mb-6 inline-flex h-7 items-center justify-center overflow-hidden rounded-full border border-primary/30 bg-primary/[0.06] px-3 font-mono text-[10px] uppercase tracking-[0.22em] text-primary"
+      >
+        <div className="pointer-events-none mr-1 h-1.5 w-1.5 rounded-full bg-primary shadow-[0_0_8px_oklch(0.58_0.19_258/0.65)]" />
+        <div className="relative h-4 w-[140px]">
+          {THINKING_WORDS.map((w, i) => (
+            <span
+              key={w}
+              className="think-word absolute inset-0 flex items-center justify-center whitespace-nowrap"
+              style={{
+                animationDelay: `${(i * 6) / THINKING_WORDS.length}s`,
+              }}
+            >
+              {w}…
+            </span>
+          ))}
+        </div>
+      </div>
+
       <div className="relative mb-8 h-20 w-20">
         <div className="pulse-ring absolute inset-0 rounded-full" />
         <div

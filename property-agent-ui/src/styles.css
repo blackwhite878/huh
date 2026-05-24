@@ -257,3 +257,57 @@
   50% { transform: translateY(-6px); }
 }
 .float { animation: float 4s ease-in-out infinite; }
+
+/* ---------------------------------------------------------------------------
+ * Irregular 2D drift for Phase 1.5 floating chips.
+ * Each variant has different x/y/rotation waypoints so chips do NOT bob in
+ * sync. Amplitude is capped at ~10px to preserve the centered safe zone.
+ * ------------------------------------------------------------------------- */
+@keyframes drift-a {
+  0%   { transform: translate(0, 0)        rotate(0deg); }
+  18%  { transform: translate(6px, -4px)   rotate(0.6deg); }
+  37%  { transform: translate(-3px, -8px)  rotate(-0.8deg); }
+  55%  { transform: translate(-7px, 2px)   rotate(0.4deg); }
+  74%  { transform: translate(4px, 6px)    rotate(-0.5deg); }
+  100% { transform: translate(0, 0)        rotate(0deg); }
+}
+@keyframes drift-b {
+  0%   { transform: translate(0, 0)        rotate(0deg); }
+  22%  { transform: translate(-5px, 5px)   rotate(-0.7deg); }
+  46%  { transform: translate(7px, 3px)    rotate(0.9deg); }
+  68%  { transform: translate(2px, -7px)   rotate(0.3deg); }
+  85%  { transform: translate(-4px, -2px)  rotate(-0.4deg); }
+  100% { transform: translate(0, 0)        rotate(0deg); }
+}
+@keyframes drift-c {
+  0%   { transform: translate(0, 0)        rotate(0deg); }
+  15%  { transform: translate(4px, 7px)    rotate(0.8deg); }
+  42%  { transform: translate(-6px, 4px)   rotate(-0.6deg); }
+  63%  { transform: translate(-2px, -6px)  rotate(0.5deg); }
+  88%  { transform: translate(5px, -3px)   rotate(-0.3deg); }
+  100% { transform: translate(0, 0)        rotate(0deg); }
+}
+@keyframes drift-d {
+  0%   { transform: translate(0, 0)        rotate(0deg); }
+  20%  { transform: translate(-7px, -3px)  rotate(-0.9deg); }
+  44%  { transform: translate(3px, -6px)   rotate(0.4deg); }
+  61%  { transform: translate(6px, 4px)    rotate(0.7deg); }
+  82%  { transform: translate(-3px, 6px)   rotate(-0.5deg); }
+  100% { transform: translate(0, 0)        rotate(0deg); }
+}
+.drift   { animation-timing-function: ease-in-out; animation-iteration-count: infinite; will-change: transform; }
+.drift-a { animation-name: drift-a; }
+.drift-b { animation-name: drift-b; }
+.drift-c { animation-name: drift-c; }
+.drift-d { animation-name: drift-d; }
+
+/* Cycling "thinking word" chip on Phase 1.5 — animated verb that
+ * fades/rises between phrases. Pure presentation; no state side effects. */
+@keyframes think-cycle {
+  0%, 18%   { opacity: 0; transform: translateY(4px); }
+  6%, 14%   { opacity: 1; transform: translateY(0); }
+  20%, 100% { opacity: 0; transform: translateY(-4px); }
+}
+.think-word {
+  animation: think-cycle 6s ease-in-out infinite both;
+}

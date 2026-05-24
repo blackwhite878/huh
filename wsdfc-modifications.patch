@@ -1,0 +1,375 @@
+diff --git a/property-agent-ui/src/components/DevPanel.tsx b/property-agent-ui/src/components/DevPanel.tsx
+index 607eac5..26c4878 100644
+--- a/property-agent-ui/src/components/DevPanel.tsx
++++ b/property-agent-ui/src/components/DevPanel.tsx
+@@ -75,6 +75,8 @@ export function DevPanel() {
+         gender: "prefer_not_to_say",
+         description:
+           "Avoid west-facing units, no security is a dealbreaker, want to be close to MRT.",
++        house_type: "Condo",
++        location: "Johor Bahru",
+       });
+     }
+     switch (target) {
+diff --git a/property-agent-ui/src/components/phases/Conversation.tsx b/property-agent-ui/src/components/phases/Conversation.tsx
+index 8a46939..e641d16 100644
+--- a/property-agent-ui/src/components/phases/Conversation.tsx
++++ b/property-agent-ui/src/components/phases/Conversation.tsx
+@@ -19,7 +19,6 @@ export function Conversation() {
+   const [input, setInput] = useState("");
+   const [sending, setSending] = useState(false);
+   const endRef = useRef<HTMLDivElement>(null);
+-  const greetedRef = useRef(false);
+ 
+   const locked =
+     appState === "SEARCHING" || appState === "SEMANTIC_ALIGNING" || sending;
+@@ -28,21 +27,12 @@ export function Conversation() {
+     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+   }, [messages.length, pendingConflict, sending]);
+ 
+-  // Seed with greeting once (guard against StrictMode double-invoke)
+-  useEffect(() => {
+-    if (greetedRef.current) return;
+-    if (messages.length === 0) {
+-      greetedRef.current = true;
+-      appendMessage({
+-        role: "assistant",
+-        content:
+-          "Hi — I have your profile ready. Tell me a little more about the home you have in mind. Anything specific about location, layout, or lifestyle?",
+-      });
+-    } else {
+-      greetedRef.current = true;
+-    }
+-    // eslint-disable-next-line react-hooks/exhaustive-deps
+-  }, []);
++  // No preset greeting / opening question. The LLM owns the opening turn:
++  // when the user sends their FIRST message, we POST it to /chat and the
++  // assistant's reply (and any clarifying question) comes back from the
++  // model. The ThinkingBubble below renders while that first request is
++  // in flight, so the thinking process appears immediately after the
++  // user's first prompt — not the second.
+ 
+   // Build a Known-Facts block from Phase 1 + Phase 1.5 + everything the
+   // user has already said in Phase 2. We DO NOT try to re-summarise the
+diff --git a/property-agent-ui/src/components/phases/FloatingTags.tsx b/property-agent-ui/src/components/phases/FloatingTags.tsx
+index ff2c390..09ad6af 100644
+--- a/property-agent-ui/src/components/phases/FloatingTags.tsx
++++ b/property-agent-ui/src/components/phases/FloatingTags.tsx
+@@ -1,19 +1,30 @@
+-// Floating decorative chips for the profiling page.
++// Floating chips for the profiling page (Phase 1.5).
++//
++// Surfaces the live Phase 1 facts the agent is reasoning over —
++// budget, house type, location — alongside the original decorative
++// labels. Values come from the store; missing optional fields render
++// as "—" rather than blank chips.
++//
+ // Hard constraint: chips MUST NOT enter the centered safe zone where the
+ // headline / sub-copy / progress bars are rendered.
+ //
+-// Strategy: anchor each chip to a fixed corner offset (well outside the
+-// safe zone) and oscillate by only a few pixels via CSS. Because the
+-// anchor is far from the center AND the animation amplitude is bounded
+-// (< 8px), it is mathematically impossible for a chip to enter the safe
+-// zone at any frame. No JS collision loop needed.
+-//
+-// On viewports narrower than the safe-zone width + chip margin, chips
+-// are hidden — there is no honest position that avoids overlap.
++// Strategy:
++//   - Anchor each chip to a fixed corner offset (well outside the safe
++//     zone) and animate inside a bounded amplitude (~10px).
++//   - Motion is 2D + slight rotation, driven by one of four irregular
++//     drift keyframes with prime-ish durations/delays — no two chips
++//     share the same phase, so the overall pattern is non-periodic on
++//     human timescales (no synchronous up/down bobbing).
++//   - On viewports narrower than the safe-zone width + chip margin,
++//     chips are hidden — there is no honest position that avoids overlap.
+ 
+ import { useEffect, useState } from "react";
++import { useAppStore } from "@/lib/store";
++
++type DriftVariant = "a" | "b" | "c" | "d";
+ 
+ interface Anchor {
++  key: string;
+   label: string;
+   // Position relative to the host container. Exactly one of left/right
+   // and one of top/bottom is set, in percent.
+@@ -22,21 +33,27 @@ interface Anchor {
+   top?: string;
+   bottom?: string;
+   delay: string;
++  duration: string;
++  variant: DriftVariant;
++  emphasis?: boolean;
+ }
+ 
+-const ANCHORS: Anchor[] = [
+-  { label: "BUDGET",       left: "4%",  top: "18%", delay: "0s"   },
+-  { label: "IDENTITY",     right: "5%", top: "22%", delay: "0.6s" },
+-  { label: "TARGET",       right: "3%", top: "55%", delay: "1.2s" },
+-  { label: "LIFESTYLE",    left: "6%",  bottom: "22%", delay: "0.3s" },
+-  { label: "DEALBREAKERS", right: "8%", bottom: "26%", delay: "0.9s" },
+-];
+-
+ // Below this viewport width the safe zone + chip margins do not fit.
+ const MIN_WIDTH_PX = 880;
+ 
++function fmtBudget(n: number | undefined): string {
++  if (!n || n <= 0) return "—";
++  return `RM ${n.toLocaleString("en-MY")}`;
++}
++
++function fmtText(v: string | undefined): string {
++  const t = (v ?? "").trim();
++  return t.length ? t : "—";
++}
++
+ export function FloatingTags() {
+   const [visible, setVisible] = useState(false);
++  const phase1 = useAppStore((s) => s.phase1Form);
+ 
+   useEffect(() => {
+     const check = () => setVisible(window.innerWidth >= MIN_WIDTH_PX);
+@@ -47,21 +64,97 @@ export function FloatingTags() {
+ 
+   if (!visible) return null;
+ 
++  const anchors: Anchor[] = [
++    {
++      key: "budget",
++      label: `BUDGET · ${fmtBudget(phase1?.budget)}`,
++      left: "4%",
++      top: "16%",
++      delay: "0s",
++      duration: "7.3s",
++      variant: "a",
++      emphasis: true,
++    },
++    {
++      key: "house_type",
++      label: `HOUSE TYPE · ${fmtText(phase1?.house_type)}`,
++      right: "4%",
++      top: "18%",
++      delay: "0.7s",
++      duration: "8.9s",
++      variant: "b",
++      emphasis: true,
++    },
++    {
++      key: "location",
++      label: `LOCATION · ${fmtText(phase1?.location)}`,
++      left: "5%",
++      bottom: "20%",
++      delay: "1.3s",
++      duration: "6.7s",
++      variant: "c",
++      emphasis: true,
++    },
++    {
++      key: "identity",
++      label: "IDENTITY",
++      right: "6%",
++      top: "52%",
++      delay: "0.4s",
++      duration: "9.7s",
++      variant: "d",
++    },
++    {
++      key: "target",
++      label: "TARGET",
++      right: "8%",
++      bottom: "24%",
++      delay: "1.9s",
++      duration: "7.9s",
++      variant: "a",
++    },
++    {
++      key: "lifestyle",
++      label: "LIFESTYLE",
++      left: "7%",
++      top: "48%",
++      delay: "1.1s",
++      duration: "8.3s",
++      variant: "b",
++    },
++    {
++      key: "dealbreakers",
++      label: "DEALBREAKERS",
++      left: "9%",
++      bottom: "44%",
++      delay: "2.3s",
++      duration: "10.1s",
++      variant: "c",
++    },
++  ];
++
+   return (
+     <div
+       aria-hidden
+       className="pointer-events-none absolute inset-0 overflow-hidden"
+     >
+-      {ANCHORS.map((a) => (
++      {anchors.map((a) => (
+         <div
+-          key={a.label}
+-          className="float absolute rounded-full border border-border/60 bg-surface/70 px-3 py-1 font-mono text-[10px] uppercase tracking-[0.22em] text-muted-foreground backdrop-blur-sm"
++          key={a.key}
++          className={[
++            "drift absolute rounded-full border px-3 py-1 font-mono text-[10px] uppercase tracking-[0.22em] backdrop-blur-sm",
++            `drift-${a.variant}`,
++            a.emphasis
++              ? "border-primary/40 bg-primary/[0.06] text-foreground/80"
++              : "border-border/60 bg-surface/70 text-muted-foreground",
++          ].join(" ")}
+           style={{
+             left: a.left,
+             right: a.right,
+             top: a.top,
+             bottom: a.bottom,
+             animationDelay: a.delay,
++            animationDuration: a.duration,
+           }}
+         >
+           {a.label}
+diff --git a/property-agent-ui/src/components/phases/PhaseOneForm.tsx b/property-agent-ui/src/components/phases/PhaseOneForm.tsx
+index da85daf..fccaba4 100644
+--- a/property-agent-ui/src/components/phases/PhaseOneForm.tsx
++++ b/property-agent-ui/src/components/phases/PhaseOneForm.tsx
+@@ -43,6 +43,9 @@ export function PhaseOneForm() {
+     identity: "first_time_buyer",
+     gender: "prefer_not_to_say",
+     description: "",
++    // Backend-only fields (no Phase 1 UI). Sent as empty string when unknown.
++    house_type: "",
++    location: "",
+   });
+ 
+   const valid =
+diff --git a/property-agent-ui/src/components/phases/SemanticAligning.tsx b/property-agent-ui/src/components/phases/SemanticAligning.tsx
+index da4e4b3..5656ba2 100644
+--- a/property-agent-ui/src/components/phases/SemanticAligning.tsx
++++ b/property-agent-ui/src/components/phases/SemanticAligning.tsx
+@@ -4,6 +4,17 @@ import { subscribeSessionReady } from "@/lib/api";
+ import { deriveTagsFromDescription } from "@/lib/semantic";
+ import { FloatingTags } from "./FloatingTags";
+ 
++// Verbs cycled in the "thinking word" chip. Pure UX — not driven by the
++// backend. Five phrases × ~1.2s slot each = one 6s loop, matched to the
++// .think-word keyframes in styles.css.
++const THINKING_WORDS = [
++  "Thinking",
++  "Aligning",
++  "Parsing",
++  "Cross-referencing",
++  "Drafting",
++];
++
+ // Backend is authoritative. The local-derived path is a UI placeholder ONLY —
+ // even after it runs, a subsequent backend "ready" event will overwrite it.
+ const LOCAL_PLACEHOLDER_AFTER_MS = 60_000;
+@@ -62,6 +73,27 @@ export function SemanticAligning() {
+   return (
+     <div className="relative flex min-h-[60vh] flex-col items-center justify-center text-center">
+       <FloatingTags />
++      {/* Animated "thinking word" chip — cycles verbs while the backend works. */}
++      <div
++        aria-live="polite"
++        className="relative mb-6 inline-flex h-7 items-center justify-center overflow-hidden rounded-full border border-primary/30 bg-primary/[0.06] px-3 font-mono text-[10px] uppercase tracking-[0.22em] text-primary"
++      >
++        <div className="pointer-events-none mr-1 h-1.5 w-1.5 rounded-full bg-primary shadow-[0_0_8px_oklch(0.58_0.19_258/0.65)]" />
++        <div className="relative h-4 w-[140px]">
++          {THINKING_WORDS.map((w, i) => (
++            <span
++              key={w}
++              className="think-word absolute inset-0 flex items-center justify-center whitespace-nowrap"
++              style={{
++                animationDelay: `${(i * 6) / THINKING_WORDS.length}s`,
++              }}
++            >
++              {w}…
++            </span>
++          ))}
++        </div>
++      </div>
++
+       <div className="relative mb-8 h-20 w-20">
+         <div className="pulse-ring absolute inset-0 rounded-full" />
+         <div
+diff --git a/property-agent-ui/src/lib/types.ts b/property-agent-ui/src/lib/types.ts
+index f5f0604..16fa741 100644
+--- a/property-agent-ui/src/lib/types.ts
++++ b/property-agent-ui/src/lib/types.ts
+@@ -36,6 +36,10 @@ export interface Phase1Form {
+   identity: Identity;
+   gender: Gender;
+   description: string;
++  // Backend-only payload fields. No Phase 1 UI input today; default to "" so
++  // the backend always receives a stable string contract.
++  house_type: string;
++  location: string;
+ }
+ 
+ // Aligned to backend DialogueMessage.role contract (user | assistant only)
+diff --git a/property-agent-ui/src/styles.css b/property-agent-ui/src/styles.css
+index bf8710b..752884b 100644
+--- a/property-agent-ui/src/styles.css
++++ b/property-agent-ui/src/styles.css
+@@ -257,3 +257,57 @@
+   50% { transform: translateY(-6px); }
+ }
+ .float { animation: float 4s ease-in-out infinite; }
++
++/* ---------------------------------------------------------------------------
++ * Irregular 2D drift for Phase 1.5 floating chips.
++ * Each variant has different x/y/rotation waypoints so chips do NOT bob in
++ * sync. Amplitude is capped at ~10px to preserve the centered safe zone.
++ * ------------------------------------------------------------------------- */
++@keyframes drift-a {
++  0%   { transform: translate(0, 0)        rotate(0deg); }
++  18%  { transform: translate(6px, -4px)   rotate(0.6deg); }
++  37%  { transform: translate(-3px, -8px)  rotate(-0.8deg); }
++  55%  { transform: translate(-7px, 2px)   rotate(0.4deg); }
++  74%  { transform: translate(4px, 6px)    rotate(-0.5deg); }
++  100% { transform: translate(0, 0)        rotate(0deg); }
++}
++@keyframes drift-b {
++  0%   { transform: translate(0, 0)        rotate(0deg); }
++  22%  { transform: translate(-5px, 5px)   rotate(-0.7deg); }
++  46%  { transform: translate(7px, 3px)    rotate(0.9deg); }
++  68%  { transform: translate(2px, -7px)   rotate(0.3deg); }
++  85%  { transform: translate(-4px, -2px)  rotate(-0.4deg); }
++  100% { transform: translate(0, 0)        rotate(0deg); }
++}
++@keyframes drift-c {
++  0%   { transform: translate(0, 0)        rotate(0deg); }
++  15%  { transform: translate(4px, 7px)    rotate(0.8deg); }
++  42%  { transform: translate(-6px, 4px)   rotate(-0.6deg); }
++  63%  { transform: translate(-2px, -6px)  rotate(0.5deg); }
++  88%  { transform: translate(5px, -3px)   rotate(-0.3deg); }
++  100% { transform: translate(0, 0)        rotate(0deg); }
++}
++@keyframes drift-d {
++  0%   { transform: translate(0, 0)        rotate(0deg); }
++  20%  { transform: translate(-7px, -3px)  rotate(-0.9deg); }
++  44%  { transform: translate(3px, -6px)   rotate(0.4deg); }
++  61%  { transform: translate(6px, 4px)    rotate(0.7deg); }
++  82%  { transform: translate(-3px, 6px)   rotate(-0.5deg); }
++  100% { transform: translate(0, 0)        rotate(0deg); }
++}
++.drift   { animation-timing-function: ease-in-out; animation-iteration-count: infinite; will-change: transform; }
++.drift-a { animation-name: drift-a; }
++.drift-b { animation-name: drift-b; }
++.drift-c { animation-name: drift-c; }
++.drift-d { animation-name: drift-d; }
++
++/* Cycling "thinking word" chip on Phase 1.5 — animated verb that
++ * fades/rises between phrases. Pure presentation; no state side effects. */
++@keyframes think-cycle {
++  0%, 18%   { opacity: 0; transform: translateY(4px); }
++  6%, 14%   { opacity: 1; transform: translateY(0); }
++  20%, 100% { opacity: 0; transform: translateY(-4px); }
++}
++.think-word {
++  animation: think-cycle 6s ease-in-out infinite both;
++}

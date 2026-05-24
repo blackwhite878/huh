@@ -75,6 +75,8 @@ export function DevPanel() {
         gender: "prefer_not_to_say",
         description:
           "Avoid west-facing units, no security is a dealbreaker, want to be close to MRT.",
+        house_type: "Condo",
+        location: "Johor Bahru",
       });
     }
     switch (target) {

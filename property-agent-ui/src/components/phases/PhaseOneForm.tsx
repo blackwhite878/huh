@@ -43,6 +43,9 @@ export function PhaseOneForm() {
     identity: "first_time_buyer",
     gender: "prefer_not_to_say",
     description: "",
+    // Backend-only fields (no Phase 1 UI). Sent as empty string when unknown.
+    house_type: "",
+    location: "",
   });
 
   const valid =

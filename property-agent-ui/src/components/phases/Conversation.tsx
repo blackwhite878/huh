@@ -19,7 +19,6 @@ export function Conversation() {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
-  const greetedRef = useRef(false);
 
   const locked =
     appState === "SEARCHING" || appState === "SEMANTIC_ALIGNING" || sending;
@@ -28,21 +27,12 @@ export function Conversation() {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages.length, pendingConflict, sending]);
 
-  // Seed with greeting once (guard against StrictMode double-invoke)
-  useEffect(() => {
-    if (greetedRef.current) return;
-    if (messages.length === 0) {
-      greetedRef.current = true;
-      appendMessage({
-        role: "assistant",
-        content:
-          "Hi — I have your profile ready. Tell me a little more about the home you have in mind. Anything specific about location, layout, or lifestyle?",
-      });
-    } else {
-      greetedRef.current = true;
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // No preset greeting / opening question. The LLM owns the opening turn:
+  // when the user sends their FIRST message, we POST it to /chat and the
+  // assistant's reply (and any clarifying question) comes back from the
+  // model. The ThinkingBubble below renders while that first request is
+  // in flight, so the thinking process appears immediately after the
+  // user's first prompt — not the second.
 
   // Build a Known-Facts block from Phase 1 + Phase 1.5 + everything the
   // user has already said in Phase 2. We DO NOT try to re-summarise the
