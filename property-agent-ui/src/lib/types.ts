@@ -18,7 +18,7 @@ export type AppState =
   | "TIER3_NO_RESULT"
   | "PHASE_1_INITIAL";
 
-export type AgentStyle = "professional" | "friendly" | "active";
+export type AgentStyle = "Professional" | "Friendly" | "Enthusiastic";
 export type Identity = "first_time_buyer" | "investor" | "upgrader";
 export type Gender = "female" | "male" | "prefer_not_to_say";
 export type SearchStage =

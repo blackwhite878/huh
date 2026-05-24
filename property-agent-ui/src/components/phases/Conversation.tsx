@@ -5,11 +5,10 @@ import { api, type ChatContext } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { ThinkingBubble } from "./ThinkingBubble";
 
-// When the user has answered at least MUST_FILL_THRESHOLD essential
-// questions in Phase 2 (i.e. the "must-filled bracket"), the agent has
-// enough context to start searching. The popup notifies the user and
-// auto-redirects to SEARCHING after AUTO_REDIRECT_MS.
-const MUST_FILL_THRESHOLD = 3;
+// When the LLM signals it has enough context via fc_trigger (which manifests
+// as status="searching" from the backend), we show a popup notifying the user
+// and auto-redirect to SEARCHING after AUTO_REDIRECT_MS. This is driven by
+// the LLM's decision, not a hardcoded message count.
 const AUTO_REDIRECT_MS = 3000;
 
 // Human-readable labels for fields that may appear in a conflict.
@@ -50,8 +49,10 @@ export function Conversation() {
 
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
-  // Enough-info redirect popup state. `dismissed` guarantees it only
-  // shows once per session, so the user is not nagged repeatedly.
+  const [retryCount, setRetryCount] = useState(0);
+  // Triggered when backend responds with status="searching" (LLM decided enough
+  // context). Shows popup to notify user before auto-redirect. `dismissed`
+  // ensures it shows only once per session.
   const [readyPopup, setReadyPopup] = useState<{
     open: boolean;
     countdown: number;
@@ -69,26 +70,18 @@ export function Conversation() {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages.length, pendingConflict, sending]);
 
-  // Count user turns to decide whether the "must-filled bracket" is met.
-  const userTurnCount = useMemo(
-    () => messages.filter((m) => m.role === "user").length,
-    [messages],
-  );
-
-  // Trigger enough-info popup when the user has filled at least the
-  // required bracket of essential answers AND we are still in CHATTING
-  // (no conflict pending, not already searching). Fires once.
+  // Trigger ready-to-search popup when backend responds with status="searching"
+  // (which sets appState to SEARCHING). The LLM's fc_trigger decision determines
+  // when this happens, not a hardcoded message count. Fires once.
   useEffect(() => {
     if (readyPopup.dismissed || readyPopup.open) return;
-    if (appState !== "CHATTING") return;
-    if (pendingConflict) return;
-    if (userTurnCount < MUST_FILL_THRESHOLD) return;
+    if (appState !== "SEARCHING") return;
     setReadyPopup({
       open: true,
       countdown: AUTO_REDIRECT_MS / 1000,
       dismissed: false,
     });
-  }, [userTurnCount, appState, pendingConflict, readyPopup]);
+  }, [appState, readyPopup]);
 
   // Drive the popup countdown and auto-redirect to SEARCHING.
   useEffect(() => {
@@ -145,6 +138,43 @@ export function Conversation() {
     };
   }, [phase1Form, semanticTags, messages]);
 
+  // ───────────────────────────────────────────────────────────────
+  // Proactive Phase 2 opener.
+  //
+  // When the user enters CHATTING with an empty transcript, ask the
+  // backend to generate the first question. We show ThinkingBubble
+  // (via `sending`) while waiting so the user sees the LLM "thinking"
+  // animation instead of an empty box. Guarded so it fires at most
+  // once per session (a ref protects against React StrictMode double
+  // mounts; the backend is also idempotent on its side).
+  const openerStartedRef = useRef(false);
+  useEffect(() => {
+    if (openerStartedRef.current) return;
+    if (appState !== "CHATTING") return;
+    if (!sessionId) return;
+    if (messages.length > 0) return;     // existing transcript — don't re-open
+    if (!chatContext) return;            // wait until Phase 1 facts are ready
+    if (sending) return;
+
+    openerStartedRef.current = true;
+    setSending(true);
+    (async () => {
+      try {
+        const res = await api.chatOpening(sessionId, chatContext);
+        if (res?.reply) {
+          appendMessage({ role: "assistant", content: res.reply });
+        }
+      } catch (e) {
+        console.warn("[chat:opening] failed", e);
+        // Re-arm so a manual user message can implicitly recover; the
+        // backend chat() will still have full Phase 1 context.
+        openerStartedRef.current = false;
+      } finally {
+        setSending(false);
+      }
+    })();
+  }, [appState, sessionId, messages.length, chatContext, sending, appendMessage]);
+
   const triggerSearch = async () => {
     if (!sessionId) return;
     try {
@@ -169,24 +199,65 @@ export function Conversation() {
     appendMessage({ role: "user", content: text, timestamp: Date.now() });
     setInput("");
     setSending(true);
-    try {
-      const res = await api.chat(sessionId, text, chatContext ?? undefined);
-      appendMessage({ role: "assistant", content: res.reply });
-      if (res.status === "pending_confirmation") {
-        setPendingConflict({
-          conflicting_field: res.conflicting_field ?? "",
-          proposed_value: res.proposed_value,
-          reply: res.reply,
-        });
-        setAppState("PENDING_CONFIRMATION");
-      } else if (res.status === "searching") {
-        setAppState("SEARCHING");
+    setRetryCount(0);
+
+    // Retry logic with exponential backoff
+    const maxRetries = 5;
+    let lastError: Error | null = null;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const res = await api.chat(sessionId, text, chatContext ?? undefined);
+        appendMessage({ role: "assistant", content: res.reply });
+        if (res.status === "pending_confirmation") {
+          setPendingConflict({
+            conflicting_field: res.conflicting_field ?? "",
+            proposed_value: res.proposed_value,
+            reply: res.reply,
+          });
+          setAppState("PENDING_CONFIRMATION");
+        } else if (res.status === "searching") {
+          setAppState("SEARCHING");
+        }
+        setRetryCount(0);
+        setSending(false);
+        return; // Success
+      } catch (e) {
+        lastError = e instanceof Error ? e : new Error(String(e));
+        const errorStatus = (lastError as any).status;
+
+        // Only retry for server errors (5xx)
+        if (errorStatus >= 500 && errorStatus < 600 && attempt < maxRetries) {
+          // Calculate exponential backoff: 1s, 2s, 4s, 8s, 16s
+          const delayMs = Math.pow(2, attempt) * 1000;
+          setRetryCount(attempt + 1);
+          console.warn(
+            `[chat] attempt ${attempt + 1} failed with status ${errorStatus}, retrying in ${delayMs / 1000}s:`,
+            lastError.message,
+          );
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        } else {
+          // For client errors (4xx) or other non-retryable errors, or if max retries reached
+          console.error("[chat] non-retryable error or max retries exhausted:", lastError);
+          appendMessage({
+            role: "assistant",
+            content:
+              "Sorry, I encountered an error and couldn't process your request. Please try again.",
+          });
+          setSending(false);
+          return;
+        }
       }
-    } catch (e) {
-      console.warn("[chat] failed", e);
-    } finally {
-      setSending(false);
     }
+
+    // All retries exhausted (should only be reached for 5xx errors if maxRetries is hit)
+    console.error("[chat] all retries exhausted:", lastError);
+    appendMessage({
+      role: "assistant",
+      content:
+        "Sorry, I'm having trouble connecting right now. Please try your message again in a moment.",
+    });
+    setSending(false);
   };
 
   // Conflict resolution.
@@ -229,7 +300,7 @@ export function Conversation() {
             Live consultation
           </h2>
           <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-            phase 2 · adaptive dialogue
+            Phase 2 : Deep Chatting
           </p>
         </div>
       </div>
@@ -241,7 +312,7 @@ export function Conversation() {
             <MessageBubble key={i} role={m.role} content={m.content} />
           ))}
 
-          {sending && <ThinkingBubble />}
+          {sending && <ThinkingBubble retryCount={retryCount} />}
 
           {pendingConflict && (
             <ConflictCard
@@ -335,7 +406,7 @@ function ConflictCard({
     <div className="flex animate-in fade-in slide-in-from-bottom-2 justify-start">
       <div className="max-w-[85%] rounded-2xl rounded-tl-sm border border-warning/30 bg-warning/10 p-4">
         <div className="mb-3 font-mono text-[10px] uppercase tracking-[0.18em] text-warning">
-          field conflict · {field}
+          Conflict : {field}
         </div>
         <p className="mb-3 text-sm text-foreground">{reply}</p>
         <div className="mb-4 rounded-lg border border-warning/20 bg-background/60 p-3 text-xs text-foreground/90">

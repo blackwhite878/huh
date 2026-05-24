@@ -56,7 +56,11 @@ async function postJSON<T>(path: string, body: unknown): Promise<T> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`POST ${path} failed: ${res.status}`);
+  if (!res.ok) {
+    const error = new Error(`POST ${path} failed: ${res.status} ${res.statusText}`);
+    (error as any).status = res.status; // Attach status code to error object
+    throw error;
+  }
   return res.json() as Promise<T>;
 }
 
@@ -86,6 +90,15 @@ export const api = {
       message,
       // Optional enrichment so backend can dedupe questions. Unknown
       // fields are ignored by older backends — safe additive payload.
+      ...(context ? { client_context: context } : {}),
+    }),
+
+  // Proactive Phase 2 opener — server speaks first. Idempotent on the
+  // backend so duplicate calls (StrictMode, fast re-mounts) return the
+  // existing opener instead of generating a new one.
+  chatOpening: (sessionId: string, context?: ChatContext) =>
+    postJSON<ChatResponse>("/chat_opening", {
+      session_id: sessionId,
       ...(context ? { client_context: context } : {}),
     }),
 

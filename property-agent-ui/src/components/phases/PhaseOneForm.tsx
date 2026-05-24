@@ -25,9 +25,9 @@ const GENDERS: { value: Gender; label: string }[] = [
   { value: "prefer_not_to_say", label: "Prefer not to say" },
 ];
 const STYLES: { value: AgentStyle; label: string; hint: string }[] = [
-  { value: "professional", label: "Professional", hint: "Crisp · advisory" },
-  { value: "friendly", label: "Friendly", hint: "Warm · conversational" },
-  { value: "active", label: "Active", hint: "Punchy · proactive" },
+  { value: "Professional", label: "Professional", hint: "Crisp · advisory" },
+  { value: "Friendly", label: "Friendly", hint: "Warm · conversational" },
+  { value: "Enthusiastic", label: "Enthusiastic", hint: "Punchy · proactive" },
 ];
 
 export function PhaseOneForm() {
@@ -38,7 +38,7 @@ export function PhaseOneForm() {
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState<Phase1Form>({
     budget: 500000,
-    agent_style: "professional",
+    agent_style: "Professional",
     target: "",
     identity: "first_time_buyer",
     gender: "prefer_not_to_say",
@@ -120,13 +120,13 @@ export function PhaseOneForm() {
           {/* Target */}
           <div className="space-y-2.5">
             <Label className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-              Target area / property
+              Target area
             </Label>
             <Input
               value={form.target}
               onChange={(e) => setForm({ ...form, target: e.target.value })}
               className="h-12 rounded-xl border-border-strong bg-surface-raised/80 text-base"
-              placeholder="e.g. Condo in Johor Bahru"
+              placeholder="e.g. Johor Bahru"
             />
           </div>
 
@@ -134,7 +134,7 @@ export function PhaseOneForm() {
           <div className="space-y-2.5 md:col-span-2">
             <div className="flex items-baseline justify-between">
               <Label className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-                What should we avoid? · describe your dealbreakers
+                What features are must-haves, dealbreakers, or nice-to-haves? (at least 10 characters)
               </Label>
               <span className="font-mono text-[10px] tabular-nums text-muted-foreground/70">
                 {form.description.trim().length}/600
@@ -147,10 +147,10 @@ export function PhaseOneForm() {
               }
               rows={4}
               className="min-h-[112px] rounded-xl border-border-strong bg-surface-raised/80 text-[15px] leading-relaxed placeholder:text-muted-foreground/60"
-              placeholder="e.g. No west-facing units, must have security, prefer high floor and close to MRT. Avoid noisy main roads."
+              placeholder="e.g. Car park, must have security, prefer high floor and close to MRT. Avoid noisy main roads."
             />
             <p className="font-mono text-[10px] uppercase tracking-[0.15em] text-muted-foreground/70">
-              Used to derive your exclusion tags during semantic alignment.
+              Use to generate preference tags during semantic alignment.
             </p>
           </div>
 
@@ -194,7 +194,7 @@ export function PhaseOneForm() {
           {/* Style */}
           <div className="space-y-2.5">
             <Label className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-              Agent tone
+              Agent Personalities
             </Label>
             <div className="grid grid-cols-3 gap-2">
               {STYLES.map((s) => (
@@ -220,7 +220,7 @@ export function PhaseOneForm() {
         <div className="flex items-center justify-between gap-4 border-t border-border/60 bg-surface/40 px-8 py-5 md:px-10">
           <div className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
             <Building2 className="h-3.5 w-3.5" />
-            5 fields · 30 seconds
+            5 fields
           </div>
           <Button
             onClick={submit}

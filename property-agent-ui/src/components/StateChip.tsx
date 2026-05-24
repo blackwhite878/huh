@@ -1,11 +1,11 @@
 import type { AppState } from "@/lib/types";
 
 const LABELS: Record<AppState, string> = {
-  IDLE: "Phase 1 · Onboarding",
-  PHASE_1_INITIAL: "Phase 1 · Onboarding",
+  IDLE: "Phase 1 : Onboarding",
+  PHASE_1_INITIAL: "Phase 1 : Onboarding",
   SEMANTIC_ALIGNING: "Aligning semantic profile",
   PROFILING_COMPLETE: "Profile ready",
-  CHATTING: "Phase 2 · Live consultation",
+  CHATTING: "Phase 2 : Live consultation",
   PENDING_CONFIRMATION: "Awaiting confirmation",
   SEARCHING: "Searching properties",
   BATCH_1_DISPLAY: "Results · Batch 1",

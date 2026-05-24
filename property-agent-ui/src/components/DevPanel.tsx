@@ -70,11 +70,11 @@ export function DevPanel() {
       setPhase1Form({
         budget: 500000,
         agent_style: "professional",
-        target: "Condo in Johor Bahru",
+        target: "Condo",
         identity: "first_time_buyer",
         gender: "prefer_not_to_say",
         description:
-          "Avoid west-facing units, no security is a dealbreaker, want to be close to MRT.",
+          "Car park, must have security, prefer high floor and close to MRT. Avoid noisy main roads.",
         house_type: "Condo",
         location: "Johor Bahru",
       });

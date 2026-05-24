@@ -20,10 +20,10 @@ export function AppShell({ children }: AppShellProps) {
             </div>
             <div className="flex flex-col leading-none">
               <span className="text-sm font-semibold tracking-tight">
-                Estate<span className="text-gradient">.ai</span>
+                LXVII<span className="text-gradient"></span>
               </span>
               <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-                Intelligent Property Agent
+                Property Scouting Agent
               </span>
             </div>
           </div>
@@ -45,7 +45,7 @@ export function AppShell({ children }: AppShellProps) {
       </main>
 
       <footer className="relative z-10 border-t border-border/40 py-6 text-center font-mono text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
-        crafted for malaysian property intelligence
+        Crafted by AIC hackathon 2026 by team LXVII
       </footer>
     </div>
   );

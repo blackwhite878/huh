@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 # ─── Phase 1 ───────────────────────────────────────────────────────
 class Phase1Data(BaseModel):
     budget: float
-    agent_style: Literal["professional", "friendly", "active"]
+    agent_style: Literal["Professional", "Friendly", "Enthusiastic"]
     target: str  # e.g., "condo in Johor Bahru"
     identity: Literal["first_time_buyer", "investor", "upgrader"]
     gender: Literal["female", "male", "prefer_not_to_say"]

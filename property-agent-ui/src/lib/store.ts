@@ -145,6 +145,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       phase1Form: null,
       semanticTags: [],
       alignmentWarning: false,
+      alignmentError: null,
       dialogueMessages: [],
       pendingConflict: null,
       searchStage: null,

@@ -137,8 +137,8 @@ export function FloatingTags() {
       variant: "a",
     },
     {
-      key: "dealbreakers",
-      label: "DEALBREAKERS",
+      key: "layout",
+      label: "LAYOUT",
       side: "right",
       edgeOffset: "5%",
       top: "84%",
