@@ -60,15 +60,25 @@ app.add_middleware(
 
 
 # ─── Background tasks ────────────────────────────────────────────────
-async def async_semantic_alignment(session_id: str, description: str):
+async def async_semantic_alignment(session_id: str, phase1_data: Phase1Data):
     """
-    Background task: run semantic alignment, persist tags + any hard error.
+    Background task: run semantic alignment using ALL phase 1 fields
+    (budget / target / identity / gender / agent_style / description) so the
+    profiler has full context and won't mis-tag intent at Phase 2.
     """
     try:
-        result = await llm_client.semantic_alignment(description)
+        # Pass the full structured profile, not just the free-text description.
+        profile_payload = {
+            "budget": phase1_data.budget,
+            "target": phase1_data.target,
+            "identity": phase1_data.identity,
+            "gender": phase1_data.gender,
+            "agent_style": phase1_data.agent_style,
+            "description": phase1_data.description,
+        }
+        result = await llm_client.semantic_alignment(profile_payload)
         update_semantic_tags(session_id, result, error=None)
     except Exception as e:
-        # HARD failure (network/HTTP/parse) — surface to frontend, don't pretend it's "ready with 0 tags".
         msg = f"{type(e).__name__}: {e}"
         print(f"[async_semantic_alignment] hard failure: {msg}")
         update_semantic_tags(session_id, {"positive": [], "negative": []}, error=msg)
@@ -83,16 +93,16 @@ async def init_session(
 ):
     """
     Initialize new session with Phase 1 data.
-    Async launch semantic alignment, return immediately.
+    Async launch semantic alignment over the FULL phase 1 profile, return immediately.
     """
     session_id = create_session(phase1_data)
 
-    # Launch semantic alignment in background
     background_tasks.add_task(
         async_semantic_alignment,
         session_id,
-        phase1_data.description,  # Changed from phase1_data.target to phase1_data.description
+        phase1_data,
     )
+
 
     return InitSessionResponse(
         session_id=session_id,

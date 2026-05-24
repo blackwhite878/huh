@@ -145,18 +145,34 @@ class LLMClient:
                 print(f"LLM call failed: {e}")
                 raise
 
-    async def semantic_alignment(self, description: str) -> dict[str, list[str]]:
+    async def semantic_alignment(self, profile) -> dict[str, list[str]]:
         """
-        Identify BOTH positive and negative property preferences.
+        Identify BOTH positive and negative property preferences from the
+        FULL Phase 1 profile (budget / target / identity / gender / agent_style
+        / description). Accepts either a dict (preferred) or a plain string
+        (legacy — treated as the description field only).
 
-        Failure semantics:
-          - Network / HTTP / timeout / JSON-parse failures → RAISE (caller persists as alignment_error).
-          - LLM returned valid JSON but both arrays empty → return {"positive": [], "negative": []}
-            (genuine "model found nothing", NOT a transport error).
+        Polarity rule (per product spec):
+          - Items the user explicitly REJECTS (不要 / 沒有 / 避免 / 拒絕 /
+            不想 / no / without / avoid / dealbreaker) → negative.
+          - Everything else that is a valid, actionable preference → POSITIVE
+            by default. Ambiguous noun-only lists are positive, not negative.
         """
         from positive_enum import PPP_ENUM_FULL
 
-        safe_desc = json.dumps(description, ensure_ascii=False)
+        # Normalize input shape.
+        if isinstance(profile, str):
+            profile_dict = {"description": profile}
+        elif isinstance(profile, dict):
+            profile_dict = profile
+        else:
+            # Pydantic model or similar
+            try:
+                profile_dict = dict(profile)
+            except Exception:
+                profile_dict = {"description": str(profile)}
+
+        safe_profile = json.dumps(profile_dict, ensure_ascii=False)
         ppp_hint = list(PPP_ENUM_FULL.keys())
         npp_hint = list(NPP_ENUM_FULL.keys())
 
@@ -164,18 +180,18 @@ class LLMClient:
             {
                 "role": "user",
                 "content": f"""
-你是一個房產偏好標籤分類器。從用戶輸入中同時識別「正面偏好（PPP）」與「負面偏好（NPP）」。
+你是一個房產偏好標籤分類器。從用戶的完整 Phase 1 個人檔案（包含預算、目標地區/物業、身份、性別、代理風格、自由描述）中同時識別「正面偏好（PPP）」與「負面偏好（NPP）」。
 
-用戶輸入：{safe_desc}
+用戶 Phase 1 完整資料（JSON）：{safe_profile}
 
-# 極性判斷規則
-1. 顯式信號：
-   - 否定（→ negative）：「不要 / 沒有 / 避免 / 拒絕 / 不想 / no / without / avoid / dealbreaker」
-   - 肯定（→ positive）：「要 / 必須 / 希望 / 需要 / want / need / must have / prefer」
-2. 隱式信號：用戶輸入若為純名詞清單（如 "condo, east-facing, security"），
-   且上下文無法判斷，**預設視為 negative（dealbreakers）**。
-   一旦同一輸入中出現任一肯定關鍵詞，則改回逐項按語義判斷。
-3. 同一概念若同時出現否定與肯定，各取對應極性。
+# 極性判斷規則（重要）
+1. **拒絕類關鍵詞 → negative**：「不要 / 沒有 / 避免 / 拒絕 / 不想 / 不喜歡 / no / not / without / avoid / dealbreaker / hate」。
+2. **其他任何有效條件 → positive（預設）**。包括：
+   - 肯定詞：「要 / 必須 / 希望 / 需要 / 偏好 / want / need / must / prefer / like」
+   - 純名詞清單（如 "modern, double-storey, busy working"）— 視為使用者想要的條件，全部歸 positive。
+   - 目標地區、預算範圍、身份、風格等 phase1 結構化欄位中可抽取的具體房產屬性語義（例：target="condo in Johor Bahru" → positive: ["johor_bahru"]；identity="investor" → positive: ["investment_focused"] 等，僅在語義明確時抽取）。
+3. 同一概念同時出現否定與肯定 → 各取對應極性。
+4. **嚴禁**在沒有拒絕類關鍵詞時把條件硬塞進 negative。
 
 # 標籤命名規則
 - snake_case，全小寫，不含空格、連字符、引號。
@@ -188,7 +204,7 @@ class LLMClient:
 
 # 輸出格式
 僅輸出 JSON，不要任何說明文字或 markdown 圍欄：
-{{"positive": ["needs_security"], "negative": ["east_facing"]}}
+{{"positive": ["modern_style", "double_storey", "johor_bahru"], "negative": ["west_facing"]}}
 若該極性無命中：對應陣列為 []。
                 """,
             }
@@ -201,7 +217,6 @@ class LLMClient:
             "response_format": {"type": "json_object"},
         }
 
-        # _call_api raises on network/HTTP/timeout — DO NOT swallow.
         response = await self._call_api(payload)
 
         try:
@@ -235,6 +250,7 @@ class LLMClient:
         neg = _normalize(parsed.get("negative", []))
         print(f"[semantic_alignment] normalized → positive={pos} negative={neg}")
         return {"positive": pos, "negative": neg}
+
 
 
     async def generate_remarks(
