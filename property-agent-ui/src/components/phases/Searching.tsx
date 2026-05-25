@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Search, Sparkles, BarChart3, FileText } from "lucide-react";
 import { useAppStore } from "@/lib/store";
-import { subscribeSearchStatus } from "@/lib/api";
+import { getClosedSessionReason, subscribeSearchStatus } from "@/lib/api";
 import type {
   AgentStyle,
   SearchStage,
@@ -64,6 +64,7 @@ export function Searching() {
   const setSearchStage = useAppStore((s) => s.setSearchStage);
   const setResults = useAppStore((s) => s.setResults);
   const setAppState = useAppStore((s) => s.setAppState);
+  const resetAll = useAppStore((s) => s.resetAll);
 
   // UI-only stage cursor. Advances one step per MIN_STAGE_MS until it
   // catches up to whatever the backend reports — never skips ahead.
@@ -86,9 +87,14 @@ export function Searching() {
         completePayload.current = data;
         setBackendComplete(true);
       }
+    }, (error) => {
+      if (getClosedSessionReason(error)) {
+        stop();
+        resetAll();
+      }
     });
     return stop;
-  }, [sessionId, setSearchStage]);
+  }, [sessionId, setSearchStage, resetAll]);
 
   // Drive the UI cursor forward at MIN_STAGE_MS pacing, capped by the
   // backend stage. When backendComplete is true we let it walk all the

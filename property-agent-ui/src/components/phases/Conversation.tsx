@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Send, Lock, Bot, User as UserIcon, Check, X, Sparkles } from "lucide-react";
 import { useAppStore } from "@/lib/store";
-import { api, type ChatContext } from "@/lib/api";
+import { api, getClosedSessionReason, type ChatContext } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { ThinkingBubble } from "./ThinkingBubble";
 
@@ -46,6 +46,7 @@ export function Conversation() {
   const setPendingConflict = useAppStore((s) => s.setPendingConflict);
   const phase1Form = useAppStore((s) => s.phase1Form);
   const semanticTags = useAppStore((s) => s.semanticTags);
+  const resetAll = useAppStore((s) => s.resetAll);
 
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -59,6 +60,32 @@ export function Conversation() {
     dismissed: boolean;
   }>({ open: false, countdown: AUTO_REDIRECT_MS / 1000, dismissed: false });
   const endRef = useRef<HTMLDivElement>(null);
+  const openerStartedRef = useRef(false);
+
+  const handleDeadSession = useCallback(
+    (reason: "offline" | "restarted") => {
+      const msg =
+        reason === "offline"
+          ? "Connection lost — your session has been closed. Please start over. / 连接中断，会话已关闭，请重新开始。"
+          : "The server was restarted and your session is no longer available. Local memory has been cleared. / 服务器已重启，原会话已失效，本机暂存已清除，请重新开始。";
+      setInput("");
+      setSending(false);
+      setRetryCount(0);
+      setReadyPopup({
+        open: false,
+        countdown: AUTO_REDIRECT_MS / 1000,
+        dismissed: true,
+      });
+      openerStartedRef.current = false;
+      try {
+        window.alert(msg);
+      } catch {
+        /* ignore */
+      }
+      resetAll();
+    },
+    [resetAll],
+  );
 
   const locked =
     appState === "SEARCHING" ||
@@ -147,7 +174,6 @@ export function Conversation() {
   // animation instead of an empty box. Guarded so it fires at most
   // once per session (a ref protects against React StrictMode double
   // mounts; the backend is also idempotent on its side).
-  const openerStartedRef = useRef(false);
   useEffect(() => {
     if (openerStartedRef.current) return;
     if (appState !== "CHATTING") return;
@@ -166,6 +192,11 @@ export function Conversation() {
         }
       } catch (e) {
         console.warn("[chat:opening] failed", e);
+        const closedReason = getClosedSessionReason(e);
+        if (closedReason) {
+          handleDeadSession(closedReason);
+          return;
+        }
         // Re-arm so a manual user message can implicitly recover; the
         // backend chat() will still have full Phase 1 context.
         openerStartedRef.current = false;
@@ -173,7 +204,7 @@ export function Conversation() {
         setSending(false);
       }
     })();
-  }, [appState, sessionId, messages.length, chatContext, sending, appendMessage]);
+  }, [appState, sessionId, messages.length, chatContext, sending, appendMessage, handleDeadSession]);
 
   const triggerSearch = async () => {
     if (!sessionId) return;
@@ -189,6 +220,11 @@ export function Conversation() {
       setAppState("SEARCHING");
     } catch (e) {
       console.warn("[chat:auto-search] failed", e);
+      const closedReason = getClosedSessionReason(e);
+      if (closedReason) {
+        handleDeadSession(closedReason);
+        return;
+      }
       // On failure, leave the user in chat so they can retry manually.
     }
   };
@@ -224,10 +260,20 @@ export function Conversation() {
         return; // Success
       } catch (e) {
         lastError = e instanceof Error ? e : new Error(String(e));
-        const errorStatus = (lastError as any).status;
+        const closedReason = getClosedSessionReason(e);
+        if (closedReason) {
+          handleDeadSession(closedReason);
+          return;
+        }
+        const errorStatus = (lastError as { status?: number }).status;
 
         // Only retry for server errors (5xx)
-        if (errorStatus >= 500 && errorStatus < 600 && attempt < maxRetries) {
+        if (
+          typeof errorStatus === "number" &&
+          errorStatus >= 500 &&
+          errorStatus < 600 &&
+          attempt < maxRetries
+        ) {
           // Calculate exponential backoff: 1s, 2s, 4s, 8s, 16s
           const delayMs = Math.pow(2, attempt) * 1000;
           setRetryCount(attempt + 1);
@@ -252,12 +298,7 @@ export function Conversation() {
 
     // All retries exhausted (should only be reached for 5xx errors if maxRetries is hit)
     console.error("[chat] all retries exhausted:", lastError);
-    appendMessage({
-      role: "assistant",
-      content:
-        "Sorry, I'm having trouble connecting right now. Please try your message again in a moment.",
-    });
-    setSending(false);
+    handleDeadSession("offline");
   };
 
   // Conflict resolution.

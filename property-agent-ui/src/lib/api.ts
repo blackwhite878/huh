@@ -50,6 +50,94 @@ const TRANSPORT: "sse" | "polling" =
     (import.meta.env.VITE_TRANSPORT as "sse" | "polling" | undefined)) ||
   "polling";
 
+export type ClosedSessionReason = "offline" | "restarted";
+
+interface ApiError extends Error {
+  status?: number;
+  body?: unknown;
+  detail?: unknown;
+}
+
+function getErrorStatus(error: unknown): number | undefined {
+  return typeof error === "object" && error !== null && "status" in error
+    ? (error as { status?: number }).status
+    : undefined;
+}
+
+function errorText(error: unknown): string {
+  if (error instanceof Error) return error.message.toLowerCase();
+  try {
+    return JSON.stringify(error).toLowerCase();
+  } catch {
+    return String(error).toLowerCase();
+  }
+}
+
+function isMissingSessionError(error: unknown): boolean {
+  const status = getErrorStatus(error);
+  const text = errorText(error);
+  return (
+    status === 404 ||
+    status === 410 ||
+    text.includes("session not found") ||
+    text.includes("session_not_found") ||
+    text.includes("unknown session")
+  );
+}
+
+function isNetworkError(error: unknown): boolean {
+  const status = getErrorStatus(error);
+  const text = errorText(error);
+  return (
+    status === undefined &&
+    (error instanceof TypeError ||
+      text.includes("failed to fetch") ||
+      text.includes("networkerror") ||
+      text.includes("load failed"))
+  );
+}
+
+export function getClosedSessionReason(
+  error: unknown,
+): ClosedSessionReason | null {
+  if (isMissingSessionError(error)) return "restarted";
+  if (isNetworkError(error)) return "offline";
+  return null;
+}
+
+async function createHttpError(
+  method: "GET" | "POST",
+  path: string,
+  res: Response,
+): Promise<ApiError> {
+  let body: unknown = null;
+  let detail = "";
+  try {
+    const text = await res.text();
+    if (text) {
+      try {
+        body = JSON.parse(text) as unknown;
+        const parsedDetail = (body as { detail?: unknown }).detail;
+        detail = typeof parsedDetail === "string" ? parsedDetail : text;
+      } catch {
+        body = text;
+        detail = text;
+      }
+    }
+  } catch {
+    /* ignore body parse failures */
+  }
+  const error = new Error(
+    `${method} ${path} failed: ${res.status} ${res.statusText}${
+      detail ? ` — ${detail}` : ""
+    }`,
+  ) as ApiError;
+  error.status = res.status;
+  error.body = body;
+  error.detail = (body as { detail?: unknown } | null)?.detail;
+  return error;
+}
+
 async function postJSON<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method: "POST",
@@ -57,16 +145,16 @@ async function postJSON<T>(path: string, body: unknown): Promise<T> {
     body: JSON.stringify(body),
   });
   if (!res.ok) {
-    const error = new Error(`POST ${path} failed: ${res.status} ${res.statusText}`);
-    (error as any).status = res.status; // Attach status code to error object
-    throw error;
+    throw await createHttpError("POST", path, res);
   }
   return res.json() as Promise<T>;
 }
 
 async function getJSON<T>(path: string): Promise<T> {
   const res = await fetch(`${BASE}${path}`);
-  if (!res.ok) throw new Error(`GET ${path} failed: ${res.status}`);
+  if (!res.ok) {
+    throw await createHttpError("GET", path, res);
+  }
   return res.json() as Promise<T>;
 }
 
@@ -145,6 +233,7 @@ type Stop = () => void;
 function pollLoop<T>(
   fn: () => Promise<T>,
   onData: (data: T) => void,
+  onError?: (error: unknown) => void,
   intervalMs = 3000,
 ): Stop {
   let cancelled = false;
@@ -157,6 +246,7 @@ function pollLoop<T>(
       if (!cancelled) onData(data);
     } catch (e) {
       console.warn("[poll] error", e);
+      if (!cancelled) onError?.(e);
     } finally {
       inFlight = false;
     }
@@ -207,21 +297,23 @@ function sseLoop<T>(
 export function subscribeSessionReady(
   sessionId: string,
   onData: (d: SessionReadyResponse) => void,
+  onError?: (error: unknown) => void,
 ): Stop {
   return sseLoop<SessionReadyResponse>(
     `/session_ready/${sessionId}/stream`,
     onData,
-    () => pollLoop(() => api.sessionReady(sessionId), onData, 3000),
+    () => pollLoop(() => api.sessionReady(sessionId), onData, onError, 3000),
   );
 }
 
 export function subscribeSearchStatus(
   sessionId: string,
   onData: (d: SearchStatusResponse) => void,
+  onError?: (error: unknown) => void,
 ): Stop {
   return sseLoop<SearchStatusResponse>(
     `/search_status/${sessionId}/stream`,
     onData,
-    () => pollLoop(() => api.searchStatus(sessionId), onData, 3000),
+    () => pollLoop(() => api.searchStatus(sessionId), onData, onError, 3000),
   );
 }

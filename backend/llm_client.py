@@ -145,6 +145,25 @@ class LLMClient:
                 print(f"LLM call failed: {e}")
                 raise
 
+    async def complete_json(self, messages: list[dict], model: str = LLM_MODEL) -> dict:
+        """
+        Raw JSON-object completion (no Pydantic validation). Used by the
+        scraper ranking_agent, which needs free-form numeric weights rather
+        than the ChatLLMOutput schema.
+        """
+        async with llm_semaphore:
+            payload = {
+                "model": model,
+                "messages": messages,
+                "max_tokens": 800,
+                "response_format": {"type": "json_object"},
+            }
+            response = await self._call_api(payload)
+            content = response["choices"][0]["message"]["content"]
+            return json.loads(content)
+
+
+
     async def semantic_alignment(self, profile) -> dict[str, list[str]]:
         """
         Identify BOTH positive and negative property preferences from the
@@ -198,6 +217,16 @@ class LLMClient:
 - 屬性類型詞（condo / apartment / landed / terrace / bungalow / studio）忽略，不要輸出。
 - 不確定的詞寧可丟掉，禁止編造。
 
+# 廢話 / 不相關詞過濾（重要！）
+只接受「房產屬性、地點、設施、預算、生活機能、環境條件、投資/自住取向」等與選房直接相關的語義。
+**嚴禁輸出**以下類別（屬於廢話 nonsense，與房產無關）：
+- 情緒 / 心情 / 感受詞：sleepy, happy, sad, angry, bored, lonely, excited, tired, hungry, sleepy_house…
+- 與人本身狀態相關但與房屬性無關的詞：cute, smart, lazy, funny…
+- 純抽象 / 無法對應到房產特徵的形容詞。
+- 食物、動物、人名、罵人、亂打的無意義字串（如 asdf, qwerty, xxxx）。
+- 違反房產語義 / 違和的詞（例：「想要一間 sleepy 的房子」中的 sleepy）。
+若用戶輸入的條件整段都是廢話，對應陣列回傳 []，不要硬湊。
+
 # 命名提示（非強制白名單，僅供風格對齊）
 常見 positive key 示例：{ppp_hint}
 常見 negative key 示例：{npp_hint}
@@ -231,6 +260,18 @@ class LLMClient:
         except json.JSONDecodeError as e:
             raise RuntimeError(f"semantic_alignment: LLM returned non-JSON: {e}") from e
 
+        # Defensive nonsense blacklist — drop tags that have no property
+        # semantics even if the LLM ignored the prompt rule. Keep this list
+        # focused on obvious junk (moods, emotions, gibberish). Real estate
+        # vocabulary stays untouched.
+        NONSENSE_TAGS = {
+            "sleepy", "sleepy_house", "happy", "sad", "angry", "bored",
+            "lonely", "excited", "tired", "hungry", "thirsty", "cute",
+            "smart", "lazy", "funny", "silly", "weird", "cool", "nice",
+            "good", "bad", "ok", "okay", "yes", "no", "maybe", "lol",
+            "xxx", "asdf", "qwerty", "test", "none", "null", "undefined",
+        }
+
         def _normalize(raw) -> list[str]:
             if not isinstance(raw, list):
                 return []
@@ -241,6 +282,14 @@ class LLMClient:
                     continue
                 key = item.strip().lower().replace("-", "_").replace(" ", "_")
                 if not key or key in seen:
+                    continue
+                if key in NONSENSE_TAGS:
+                    print(f"[semantic_alignment] dropped nonsense tag: {key!r}")
+                    continue
+                # Drop pure-symbol / overly short gibberish (single char,
+                # or length>=3 with no vowels and not in enums).
+                if len(key) < 2:
+                    print(f"[semantic_alignment] dropped too-short tag: {key!r}")
                     continue
                 seen.add(key)
                 out.append(key)

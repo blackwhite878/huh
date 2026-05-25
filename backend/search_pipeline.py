@@ -12,7 +12,10 @@ from session_manager import (
 )
 from weighting import apply_dynamic_weights, build_top10
 from llm_client import llm_client
-from mock_data import load_mock_data, get_mock_properties_by_district
+from mock_data import load_mock_data, get_mock_properties_by_district  # legacy fallback only
+from scraper import pipeline as scraper_pipeline
+from scraper import seeder as scraper_seeder
+from scraper import storage as scraper_storage
 from topology import get_search_districts
 
 
@@ -112,43 +115,113 @@ async def execute_search_pipeline(session_id: str) -> tuple[list[PropertyRemark]
     return remarks, False
 
 
+# ── adapter: scraped Mudah row → Property ─────────────────────────────
+_DISTRICT_FROM_REGION = {
+    "johor": "johor_bahru_city",
+    "kuala-lumpur": "kuala_lumpur_city",
+    "selangor": "petaling_jaya",
+    "penang": "george_town",
+    "melaka": "melaka_city",
+    "labuan": "labuan_city",
+    "putrajaya": "putrajaya_city",
+}
+
+
+def _row_to_property(row: dict) -> Property | None:
+    """Map a scraped Mudah row to the strict Property schema with safe defaults."""
+    try:
+        price = row.get("price")
+        price = float(price) if price not in (None, "") else 0.0
+        beds = row.get("bedrooms") or 0
+        baths = row.get("bathrooms") or 0
+        url = row.get("listing_url") or ""
+        if not url:
+            return None
+        region = (row.get("region") or "").lower()
+        district = _DISTRICT_FROM_REGION.get(region, region.replace("-", "_") + "_city")
+        return Property(
+            property_id=f"MUDAH::{url}"[:128],
+            title=(row.get("title") or "Untitled")[:200],
+            price=price,
+            location=row.get("location_area") or row.get("city") or region,
+            administrative_district=district,
+            distance_to_mrt_km=0.0,
+            is_gated_guarded=False,
+            security_level="medium",
+            facilities=[],
+            facilities_score=0.5,
+            nearby_schools=0,
+            nearby_tuition_centers=0,
+            nearby_malls=0,
+            nearby_clinics=0,
+            lifestyle_proximity_score=0.5,
+            maintenance_fee_per_sqft=0.0,
+            normalized_maintenance_fee=0.0,
+            flood_risk="unknown",
+            feature_tags=[],
+            price_fit_score=0.5,
+            security_score=0.5,
+            transit_proximity_score=0.5,
+            floor_level=0,
+            facing="unknown",
+            bedrooms=int(beds) if beds else 0,
+            bathrooms=int(baths) if baths else 0,
+            url=url,
+            source="mudah.my",
+            is_mock=False,
+        )
+    except Exception:
+        return None
+
+
 async def fetch_raw_properties(
     session_id: str,
     target_description: str,
     expansion_level: int,
 ) -> list[Property]:
     """
-    Fetch raw properties from search districts.
-    For MVP, use mock data. In production, call scraper.
+    Fetch raw properties via the Mudah scraper subsystem (replaces mock_data).
+    Expansion level widens the resolved region set; on level 3 we fan out to
+    the full Malaysia region list as a last resort.
     """
-    # Parse target to get primary district
-    # Format: "condo in Johor Bahru" -> "johor_bahru_city"
-    district_map = {
-        "johor bahru": "johor_bahru_city",
-        "kl": "kuala_lumpur_city",
-        "klcc": "kuala_lumpur_city",
-        "pj": "petaling_jaya",
-        "kuala lumpur": "kuala_lumpur_city",
-    }
+    regions = scraper_pipeline.resolve_regions(target_description)
+    if expansion_level >= 2 and len(regions) == 1:
+        # widen to neighbouring federal/state cluster on level 2+
+        regions = list(dict.fromkeys(regions + scraper_pipeline.MY_REGIONS[:5]))
+    if expansion_level >= 3:
+        regions = list(scraper_pipeline.MY_REGIONS)
 
-    primary_district = "johor_bahru_city"  # Default
-    target_lower = target_description.lower()
-    for key, district in district_map.items():
-        if key in target_lower:
-            primary_district = district
-            break
+    # Ensure tempo is populated for this session+regions (demo or realtime
+    # per config.yaml; 3-retry-then-forced-demo handled inside seeder).
+    mode = scraper_pipeline._load_mode()
+    scraper_storage.clear_session_tempo(session_id)
+    if mode == "realtime":
+        async def realtime():
+            return await scraper_seeder.fetch_realtime_into_tempo(session_id, regions)
+        def demo():
+            return scraper_seeder.load_demo_into_tempo(session_id, regions)
+        await scraper_seeder.run_with_retry_then_demo(realtime, demo, retries=3)
+    else:
+        scraper_seeder.load_demo_into_tempo(session_id, regions)
 
-    # Get search districts based on expansion level
-    search_districts = get_search_districts(primary_district, expansion_level)
+    rows: list[dict] = []
+    for r in regions:
+        rows.extend(scraper_storage.read_tempo(r, session_id))
 
-    # Load mock data filtered by districts
-    all_props = load_mock_data()
-    filtered_props = [
-        p for p in all_props
-        if p.administrative_district in search_districts
-    ]
+    properties: list[Property] = []
+    for row in rows:
+        prop = _row_to_property(row)
+        if prop is not None:
+            properties.append(prop)
 
-    return filtered_props[:50]  # Limit to max_raw_results
+    # Legacy mock fallback: if scraper produced zero (e.g. first run with no
+    # long-term CSV and realtime disabled), reuse mock_data so the pipeline
+    # never starves the tier classifier.
+    if not properties:
+        all_props = load_mock_data()
+        properties = all_props[:50]
+
+    return properties[:50]
 
 
 async def get_next_batch(session_id: str) -> list[PropertyRemark]:

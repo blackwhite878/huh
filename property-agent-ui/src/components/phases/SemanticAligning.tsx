@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { useAppStore } from "@/lib/store";
-import { subscribeSessionReady } from "@/lib/api";
+import { getClosedSessionReason, subscribeSessionReady } from "@/lib/api";
 import { deriveTagsFromDescription } from "@/lib/semantic";
 import { FloatingTags } from "./FloatingTags";
 
@@ -25,6 +25,7 @@ export function SemanticAligning() {
   const style = useAppStore((s) => s.phase1Form?.agent_style) ?? "professional";
   const setSemanticTags = useAppStore((s) => s.setSemanticTags);
   const setAppState = useAppStore((s) => s.setAppState);
+  const resetAll = useAppStore((s) => s.resetAll);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -32,19 +33,28 @@ export function SemanticAligning() {
     let placeholderTimer: ReturnType<typeof setTimeout> | null = null;
     let backendWon = false;
 
-    stop = subscribeSessionReady(sessionId, (data) => {
-      if (data.status !== "ready") return;
-      backendWon = true;
-      const merged = [
-        ...(data.positive_tags ?? []).map((t) => `pos:${t}`),
-        ...(data.semantic_tags ?? []).map((t) => `neg:${t}`),
-      ];
-      // Backend is authoritative: always overwrite, even if placeholder ran first.
-      setSemanticTags(merged, !!data.alignment_warning, data.error ?? null);
-      setAppState("PROFILING_COMPLETE");
-      if (placeholderTimer) clearTimeout(placeholderTimer);
-      stop?.();
-    });
+    stop = subscribeSessionReady(
+      sessionId,
+      (data) => {
+        if (data.status !== "ready") return;
+        backendWon = true;
+        const merged = [
+          ...(data.positive_tags ?? []).map((t) => `pos:${t}`),
+          ...(data.semantic_tags ?? []).map((t) => `neg:${t}`),
+        ];
+        // Backend is authoritative: always overwrite, even if placeholder ran first.
+        setSemanticTags(merged, !!data.alignment_warning, data.error ?? null);
+        setAppState("PROFILING_COMPLETE");
+        if (placeholderTimer) clearTimeout(placeholderTimer);
+        stop?.();
+      },
+      (error) => {
+        if (!getClosedSessionReason(error)) return;
+        if (placeholderTimer) clearTimeout(placeholderTimer);
+        stop?.();
+        resetAll();
+      },
+    );
 
     placeholderTimer = setTimeout(() => {
       if (backendWon) return;
@@ -61,7 +71,7 @@ export function SemanticAligning() {
       stop?.();
       if (placeholderTimer) clearTimeout(placeholderTimer);
     };
-  }, [sessionId, description, setSemanticTags, setAppState]);
+  }, [sessionId, description, setSemanticTags, setAppState, resetAll]);
 
   const copy =
     style === "professional"

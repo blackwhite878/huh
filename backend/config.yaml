@@ -4,3 +4,13 @@ llm:
   model: deepseek-ai/DeepSeek-V3.2-TEE
   max_tokens: 2000
   concurrency: 3
+
+# ── scraper subsystem (Mudah.my) ──────────────────────────────────────
+# mode: "demo"      → use long-term CSV under backend/data/states/
+#       "realtime"  → scrape Mudah.my live; on 3 consecutive failures the
+#                     system auto-degrades to demo and exposes
+#                     forced_demo=true via GET /api/v1/system_status so the
+#                     frontend can show a popup.
+scraper:
+  mode: demo
+  retries: 3
