@@ -35,6 +35,20 @@ class ScrapedProperty(BaseModel):
     description: Optional[str] = None
     image_urls: List[str] = Field(default_factory=list)
     raw_attributes: Dict[str, Any] = Field(default_factory=dict)
+    # ─── Extended optional attributes (used by mock fixtures & enrichment) ──
+    administrative_district: Optional[str] = None
+    distance_to_mrt_km: Optional[float] = None
+    is_gated_guarded: Optional[bool] = None
+    security_level: Optional[str] = None
+    facilities: List[str] = Field(default_factory=list)
+    nearby_schools: Optional[int] = None
+    nearby_tuition_centers: Optional[int] = None
+    nearby_malls: Optional[int] = None
+    nearby_clinics: Optional[int] = None
+    maintenance_fee_per_sqft: Optional[float] = None
+    flood_risk: Optional[str] = None
+    floor_level: Optional[int] = None
+    facing: Optional[str] = None
 
 
 # ─── Phase 1 ───────────────────────────────────────────────────────
