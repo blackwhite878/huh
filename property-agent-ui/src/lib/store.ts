@@ -7,6 +7,7 @@ import type {
   PropertyResult,
   SearchStage,
 } from "./types";
+import type { Lang } from "./i18n";
 
 // ─── Temporary session memory (Phase 2.5 spec) ────────────────────────
 // Persistence rules:
@@ -31,6 +32,7 @@ interface PersistedSnapshot {
   dialogueMessages: DialogueMessage[];
   rejectedIds: string[];
   appState: AppState;
+  lang: Lang;
   savedAt: number;
 }
 
@@ -89,6 +91,10 @@ interface AppStore {
   // State machine
   appState: AppState;
   setAppState: (s: AppState) => void;
+
+  // UI language (Phase 1 toggle persists for the whole session)
+  lang: Lang;
+  setLang: (l: Lang) => void;
 
   // Session
   sessionId: string | null;
@@ -180,6 +186,7 @@ export const useAppStore = create<AppStore>((set, get) => {
       dialogueMessages: s.dialogueMessages,
       rejectedIds: s.rejectedIds,
       appState: s.appState,
+      lang: s.lang,
       savedAt: Date.now(),
     };
   };
@@ -189,6 +196,12 @@ export const useAppStore = create<AppStore>((set, get) => {
     appState: "IDLE",
     setAppState: (s) => {
       set({ appState: s });
+      save();
+    },
+
+    lang: "en",
+    setLang: (l) => {
+      set({ lang: l });
       save();
     },
 
@@ -268,8 +281,12 @@ export const useAppStore = create<AppStore>((set, get) => {
       get().pollHandles.forEach((h) => clearInterval(h));
       // "Return home" / "new prompt" = fresh session — wipe temp memory.
       clearSnapshot();
+      // Preserve the user's chosen language across a reset; it is a UI
+      // preference, not session data.
+      const keptLang = get().lang;
       set({
         appState: "IDLE",
+        lang: keptLang,
         sessionId: null,
         phase1Form: null,
         semanticTags: [],
@@ -333,6 +350,7 @@ export const useAppStore = create<AppStore>((set, get) => {
         dialogueMessages: snap.dialogueMessages ?? [],
         rejectedIds: snap.rejectedIds ?? [],
         appState: safeState,
+        lang: snap.lang ?? get().lang,
         // Reset transient runtime state — we never persist mid-flight
         // search progress or live conflicts.
         pendingConflict: null,

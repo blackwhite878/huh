@@ -1,14 +1,18 @@
 import type { ReactNode } from "react";
 import { Sparkles } from "lucide-react";
+import { useAppStore } from "@/lib/store";
+import { LANG_LABEL, type Lang } from "@/lib/i18n";
 
 interface AppShellProps {
   children: ReactNode;
 }
 
 export function AppShell({ children }: AppShellProps) {
+  const lang = useAppStore((s) => s.lang);
+  const setLang = useAppStore((s) => s.setLang);
+
   return (
     <div className="relative min-h-screen w-full overflow-x-hidden">
-      {/* Decorative grid background */}
       <div className="pointer-events-none absolute inset-0 grid-pattern opacity-60" />
       <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/40 to-transparent" />
 
@@ -23,19 +27,47 @@ export function AppShell({ children }: AppShellProps) {
                 LXVII<span className="text-gradient"></span>
               </span>
               <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-                Property Scouting Agent
+                {lang === "en" ? "Property Scouting Agent" : "房产顾问代理"}
               </span>
             </div>
           </div>
-          <div className="hidden items-center gap-6 font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground md:flex">
-            <span className="flex items-center gap-1.5">
-              <span className="relative flex h-1.5 w-1.5">
-                <span className="absolute inset-0 animate-ping rounded-full bg-success/80" />
-                <span className="relative h-1.5 w-1.5 rounded-full bg-success" />
+
+          <div className="flex items-center gap-4">
+            {/* Language toggle — visible on all phases, default EN. */}
+            <div
+              role="group"
+              aria-label="Language"
+              className="inline-flex items-center rounded-full border border-border bg-surface-raised/60 p-0.5 font-mono text-[10px] uppercase tracking-[0.18em] backdrop-blur"
+            >
+              {(["en", "zh"] as Lang[]).map((code) => (
+                <button
+                  key={code}
+                  type="button"
+                  onClick={() => setLang(code)}
+                  aria-pressed={lang === code}
+                  className={[
+                    "rounded-full px-3 py-1 transition-all",
+                    lang === code
+                      ? "bg-primary text-primary-foreground shadow-[var(--shadow-glow)]"
+                      : "text-muted-foreground hover:text-foreground",
+                  ].join(" ")}
+                >
+                  {code === "en" ? "EN" : "中"}
+                </button>
+              ))}
+              <span className="sr-only">{LANG_LABEL[lang]}</span>
+            </div>
+
+            <div className="hidden items-center gap-6 font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground md:flex">
+              <span className="flex items-center gap-1.5">
+                <span className="relative flex h-1.5 w-1.5">
+                  <span className="absolute inset-0 animate-ping rounded-full bg-success/80" />
+                  <span className="relative h-1.5 w-1.5 rounded-full bg-success" />
+                </span>
+                {lang === "en" ? "system online" : "系统在线"}
               </span>
-              system online
-            </span>
-            <span>v1.0 · mvp</span>
+              <span>v1.0 · mvp</span>
+            </div>
           </div>
         </div>
       </header>
@@ -45,7 +77,9 @@ export function AppShell({ children }: AppShellProps) {
       </main>
 
       <footer className="relative z-10 border-t border-border/40 py-6 text-center font-mono text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
-        Crafted by AIC hackathon 2026 by team LXVII
+        {lang === "en"
+          ? "Crafted by AIC hackathon 2026 by team LXVII"
+          : "由 LXVII 团队为 AIC 黑客松 2026 打造"}
       </footer>
     </div>
   );

@@ -330,6 +330,7 @@ class LLMClient:
 若用戶輸入的條件整段都是廢話，對應陣列回傳 []，不要硬湊。
 
 # 命名提示（非強制白名單，僅供風格對齊）
+請嚴格使用以下提示中的 `snake_case` 鍵名作為輸出：
 常見 positive key 示例：{ppp_hint}
 常見 negative key 示例：{npp_hint}
 

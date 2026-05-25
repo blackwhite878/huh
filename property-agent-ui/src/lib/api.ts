@@ -20,6 +20,10 @@ export interface ChatContext {
   semantic_tags: string[];
   confirmed_facts: string[];
   instruction: string;
+  // UI language selected by the user. Backend appends an OUTPUT_LANGUAGE
+  // directive to the system prompt so every assistant reply is rendered
+  // in this language. Safe-additive: older backends ignore unknown fields.
+  lang?: "en" | "zh";
 }
 
 const BASE = (() => {

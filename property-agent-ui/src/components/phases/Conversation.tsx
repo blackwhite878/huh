@@ -46,6 +46,7 @@ export function Conversation() {
   const setPendingConflict = useAppStore((s) => s.setPendingConflict);
   const phase1Form = useAppStore((s) => s.phase1Form);
   const semanticTags = useAppStore((s) => s.semanticTags);
+  const lang = useAppStore((s) => s.lang);
   const resetAll = useAppStore((s) => s.resetAll);
 
   const [input, setInput] = useState("");
@@ -156,6 +157,7 @@ export function Conversation() {
       phase1: phase1Form,
       semantic_tags: semanticTags,
       confirmed_facts,
+      lang,
       instruction:
         "Do NOT re-ask any fact in confirmed_facts. Actively grill the user " +
         "for missing ideal-property details (specific area, bedrooms, " +
@@ -163,7 +165,7 @@ export function Conversation() {
         "focused question per turn. Trigger search only when essentials are " +
         "covered.",
     };
-  }, [phase1Form, semanticTags, messages]);
+  }, [phase1Form, semanticTags, messages, lang]);
 
   // ───────────────────────────────────────────────────────────────
   // Proactive Phase 2 opener.
