@@ -18,4 +18,5 @@ beautifulsoup4
 pandas
 asyncio
 aiohttp
+pytest
 

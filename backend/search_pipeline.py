@@ -148,7 +148,7 @@ def _row_to_property(row: dict) -> Property | None:
             property_id=f"MUDAH::{url}"[:128],
             title=(row.get("title") or "Untitled")[:200],
             price=price,
-            location=row.get("location_area") or row.get("city") or region,
+            location=row.get("location") or row.get("city") or region,
             administrative_district=district,
             distance_to_mrt_km=0.0,
             is_gated_guarded=False,

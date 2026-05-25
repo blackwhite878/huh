@@ -104,7 +104,7 @@ def test_parse_detail_falls_back_to_dom_selectors():
     assert row["bedrooms"] == 3
     assert row["bathrooms"] == 2
     assert row["built_up_sqft"] == 1800
-    assert "Subang" in (row["location_area"] or "")
+    assert "Subang" in (row["location"] or "")
     assert row["description"] and "Nice" in row["description"]
     assert "+60" in (row["agent_phone"] or "")
 
@@ -115,7 +115,7 @@ def _row(url, **over):
         "listing_url": url, "source": "mudah.my", "scraped_at": "2026-05-01T00:00:00Z",
         "title": "t", "price": 100.0, "currency": "MYR",
         "property_type": "condo", "region": "selangor",
-        "location_area": "x", "city": "x",
+        "location": "x", "city": "x",
         "bedrooms": 2, "bathrooms": 2,
         "built_up_sqft": 900, "land_sqft": None,
         "tenure": None, "furnishing": None,

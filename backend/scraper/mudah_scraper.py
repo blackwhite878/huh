@@ -1,19 +1,3 @@
-"""
-Lean async Mudah.my scraper.
-
-Design goals:
-- Primary path: httpx + BeautifulSoup4 (fast, no browser).
-- Fallback path: Playwright (JS-rendered fall-through) — used only when the
-  static fetch yields too few links or the response looks like an anti-bot
-  challenge.
-- Polite by default: per-host semaphore, randomised jitter, rotating UA.
-- No infinite loops: hard caps on pages and per-call deadlines.
-
-Public coroutine:
-    async def scrape_region_type(region, type_key, target_count, *, on_progress=None) -> list[dict]
-
-Returns rows matching storage.CSV_FIELDS.
-"""
 from __future__ import annotations
 import asyncio
 import json as _json
@@ -31,10 +15,6 @@ from .types_quota import TYPE_SEARCH_KEYWORD, display_region  # noqa: F401
 
 # ── tuning ───────────────────────────────────────────────────────────
 HOST = "https://www.mudah.my"
-# NOTE: Mudah uses path-based region routing, e.g.
-#   https://www.mudah.my/selangor/properties-for-sale?q=condo&o=2
-# The previous form `/malaysia/properties-for-sale?location=<region>` returns
-# 404 / empty pages and was the root cause of "scraper saves no data".
 LIST_PATH_TEMPLATE = "/{region}/properties-for-sale"
 MAX_PAGES_PER_QUERY = 8
 PER_HOST_CONCURRENCY = 4
@@ -49,9 +29,6 @@ USER_AGENTS = [
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36",
 ]
 
-# Mudah detail URLs end in `-<digits>.htm`. The previous regex also matched
-# `/property/properties-in-...` listing-index pages which are NOT details and
-# produced garbage parses. Tightened to detail pages only.
 LISTING_HREF_RE = re.compile(r"-\d{6,}\.htm(?:[?#]|$)")
 
 
@@ -92,7 +69,7 @@ async def _get(client: httpx.AsyncClient, url: str) -> str:
 def _playwright_get_sync(url: str) -> str:
     try:
         from playwright.sync_api import sync_playwright
-    except Exception as e:  # pragma: no cover
+    except Exception as e:
         raise RuntimeError(f"Playwright unavailable: {e}")
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
@@ -112,7 +89,6 @@ async def _playwright_get(url: str) -> str:
 
 # ── parsing ──────────────────────────────────────────────────────────
 def _build_search_url(region: str, type_key: str, page: int) -> str:
-    # region is the canonical slug ("selangor", "kuala-lumpur", "negeri-sembilan").
     kw = quote_plus(TYPE_SEARCH_KEYWORD[type_key])
     return f"{HOST}{LIST_PATH_TEMPLATE.format(region=region)}?q={kw}&o={page}"
 
@@ -158,11 +134,6 @@ def _clean_price(text: str) -> Optional[float]:
 
 
 def _extract_next_data(soup: BeautifulSoup) -> Optional[Dict]:
-    """
-    Mudah is a Next.js app. The reliable ground-truth payload lives in
-    <script id="__NEXT_DATA__" type="application/json">{...}</script>.
-    Falls back silently if absent (older A/B variants or anti-bot stub).
-    """
     tag = soup.find("script", id="__NEXT_DATA__")
     if not tag or not tag.string:
         return None
@@ -173,7 +144,6 @@ def _extract_next_data(soup: BeautifulSoup) -> Optional[Dict]:
 
 
 def _walk_find(node, predicate):
-    """Depth-first search a nested JSON tree for the first node matching predicate."""
     if predicate(node):
         return node
     if isinstance(node, dict):
@@ -190,8 +160,8 @@ def _walk_find(node, predicate):
 
 
 def _parse_from_next_data(nd: Dict) -> Dict:
-    """Best-effort extraction from Mudah's __NEXT_DATA__. Returns partial dict."""
-    out: Dict = {}
+    """全面提取 Mudah __NEXT_DATA__ 中隱藏的所有底層欄位，拒絕遺漏。"""
+    out: Dict = {"raw_attributes": {}}
     ad = _walk_find(
         nd,
         lambda n: isinstance(n, dict) and ("adId" in n or "subject" in n) and "price" in n,
@@ -199,6 +169,9 @@ def _parse_from_next_data(nd: Dict) -> Dict:
     if not isinstance(ad, dict):
         return out
 
+    # 基礎元數據提取
+    if ad.get("adId"):
+        out["list_id"] = str(ad["adId"])
     if isinstance(ad.get("subject"), str):
         out["title"] = ad["subject"]
 
@@ -208,49 +181,56 @@ def _parse_from_next_data(nd: Dict) -> Dict:
     elif isinstance(price_val, str):
         out["price"] = _clean_price(price_val)
 
-    for k_src, k_dst in (("region", "region_raw"), ("area", "location_area"),
+    # 業務欄位精確映射
+    for k_src, k_dst in (("region", "region_raw"), ("area", "location"),
                          ("city", "city"), ("sellerName", "agent_name"),
                          ("contact", "agent_phone"), ("listTime", "posted_at"),
-                         ("body", "description")):
+                         ("body", "description"), ("categoryName", "category_name")):
         if isinstance(ad.get(k_src), (str, int, float)):
             out[k_dst] = ad[k_src]
 
+    # 捕獲全量參數指標（動態屬性回收站）
     params = ad.get("parameters") or ad.get("attributes")
     if isinstance(params, list):
         for p in params:
             if not isinstance(p, dict):
                 continue
-            label = (p.get("label") or p.get("name") or "").lower()
+            label = (p.get("label") or p.get("name") or "").strip()
             val = p.get("value")
             if not label or val is None:
                 continue
-            if "bedroom" in label:
+            
+            # 將完整的 Key-Value 保留，杜絕任何新欄位遺漏
+            out["raw_attributes"][label] = val
+            
+            # 針對結構化數據進行精確轉換
+            label_lower = label.lower()
+            if "bedroom" in label_lower:
                 m = re.search(r"\d+", str(val))
-                if m:
-                    out["bedrooms"] = int(m.group(0))
-            elif "bathroom" in label:
+                if m: out["bedrooms"] = int(m.group(0))
+            elif "bathroom" in label_lower:
                 m = re.search(r"\d+", str(val))
-                if m:
-                    out["bathrooms"] = int(m.group(0))
-            elif "built" in label or "size" in label:
+                if m: out["bathrooms"] = int(m.group(0))
+            elif "built" in label_lower or "size" in label_lower:
                 m = re.search(r"[\d,]+", str(val))
                 if m:
-                    try:
-                        out["built_up_sqft"] = int(m.group(0).replace(",", ""))
-                    except ValueError:
-                        pass
-            elif "land" in label:
+                    try: out["built_up_sqft"] = int(m.group(0).replace(",", ""))
+                    except ValueError: pass
+            elif "land" in label_lower:
                 m = re.search(r"[\d,]+", str(val))
                 if m:
-                    try:
-                        out["land_sqft"] = int(m.group(0).replace(",", ""))
-                    except ValueError:
-                        pass
-            elif "tenure" in label:
+                    try: out["land_sqft"] = int(m.group(0).replace(",", ""))
+                    except ValueError: pass
+            elif "tenure" in label_lower:
                 out["tenure"] = str(val)
-            elif "furnish" in label:
+            elif "furnish" in label_lower:
                 out["furnishing"] = str(val)
+            elif "property type" in label_lower:
+                out["property_type_specific"] = str(val)
+            elif "title" in label_lower:
+                out["land_title"] = str(val)
 
+    # 圖片抓取：解除限制上限（不再截斷 [:8]），獲取完整相簿
     imgs = ad.get("images") or ad.get("mediaList") or []
     if isinstance(imgs, list):
         collected: List[str] = []
@@ -261,36 +241,35 @@ def _parse_from_next_data(nd: Dict) -> Dict:
                 for k in ("url", "large", "medium"):
                     v = it.get(k)
                     if isinstance(v, str) and v.startswith("http"):
-                        collected.append(v); break
+                        collected.append(v)
+                        break
         if collected:
-            out["image_urls"] = collected[:8]
+            out["image_urls"] = collected
+            
     return out
 
 
 def _parse_detail(html: str, url: str, region: str, type_key: str) -> Dict:
     soup = BeautifulSoup(html, "html.parser")
 
-    # Prefer the structured __NEXT_DATA__ payload; degrade to DOM scraping.
     nd = _extract_next_data(soup)
-    nd_fields: Dict = _parse_from_next_data(nd) if nd else {}
+    nd_fields: Dict = _parse_from_next_data(nd) if nd else {"raw_attributes": {}}
 
+    # ── DOM Fallbacks (當 NEXT_DATA 被防護干擾時的後備機制) ──
     title = nd_fields.get("title")
     if not title:
         h1 = soup.find("h1")
-        if h1:
-            title = h1.get_text(strip=True)
+        if h1: title = h1.get_text(strip=True)
     if not title:
         og = soup.find("meta", property="og:title")
-        if og:
-            title = og.get("content")
+        if og: title = og.get("content")
 
     text = soup.get_text(" ", strip=True)
 
     price = nd_fields.get("price")
     if price is None:
         price_el = soup.select_one('[data-testid="ad-price"]')
-        if price_el:
-            price = _clean_price(price_el.get_text(strip=True))
+        if price_el: price = _clean_price(price_el.get_text(strip=True))
     if price is None:
         price = _clean_price(text)
 
@@ -304,7 +283,7 @@ def _parse_detail(html: str, url: str, region: str, type_key: str) -> Dict:
             src = img.get("src") or img.get("data-src") or ""
             if not src or any(x in src.lower() for x in ("logo", "icon", "avatar", "placeholder")):
                 continue
-            if src.startswith("http"):
+            if src.startswith("http") and src not in images:
                 images.append(src)
 
     desc = nd_fields.get("description") or ""
@@ -315,7 +294,7 @@ def _parse_detail(html: str, url: str, region: str, type_key: str) -> Dict:
                 btn.decompose()
             desc = re.sub(r"\n{2,}", "\n", desc_el.get_text("\n", strip=True))
 
-    loc_area = nd_fields.get("location_area")
+    loc_area = nd_fields.get("location")
     if not loc_area:
         meta_kw = soup.find("meta", {"name": "keywords"})
         if meta_kw:
@@ -324,26 +303,29 @@ def _parse_detail(html: str, url: str, region: str, type_key: str) -> Dict:
     agent_name = nd_fields.get("agent_name")
     if not agent_name:
         agent_el = soup.select_one('[data-testid="seller-name"], [class*="seller-name"]')
-        if agent_el:
-            agent_name = agent_el.get_text(strip=True)
+        if agent_el: agent_name = agent_el.get_text(strip=True)
 
     agent_phone = nd_fields.get("agent_phone")
     if not agent_phone:
         phone_match = re.search(r"\+?60\s*\d[\d\s-]{6,}", text)
-        if phone_match:
-            agent_phone = phone_match.group(0).strip()
+        if phone_match: agent_phone = phone_match.group(0).strip()
 
+    # ── 完備的結構化資料組裝 ──
     return {
         "listing_url": url,
+        "list_id": nd_fields.get("list_id") or (url.split("-")[-1].replace(".htm", "") if "-" in url else None),
         "source": "mudah.my",
         "scraped_at": datetime.now(timezone.utc).isoformat(),
         "title": title,
         "price": price,
         "currency": "MYR",
         "property_type": type_key,
+        "category_name": nd_fields.get("category_name"),
         "region": region,
         "location_area": loc_area,
         "city": nd_fields.get("city") or loc_area,
+        
+        # 房屋物理特徵
         "bedrooms": nd_fields.get("bedrooms") if nd_fields.get("bedrooms") is not None
                     else (int(beds_m.group(1)) if beds_m else None),
         "bathrooms": nd_fields.get("bathrooms") if nd_fields.get("bathrooms") is not None
@@ -351,13 +333,22 @@ def _parse_detail(html: str, url: str, region: str, type_key: str) -> Dict:
         "built_up_sqft": nd_fields.get("built_up_sqft") if nd_fields.get("built_up_sqft") is not None
                     else (int(sqft_m.group(1).replace(",", "")) if sqft_m else None),
         "land_sqft": nd_fields.get("land_sqft"),
+        
+        # 房屋產權與配置
         "tenure": nd_fields.get("tenure"),
         "furnishing": nd_fields.get("furnishing"),
+        "land_title": nd_fields.get("land_title"),
+        "property_type_specific": nd_fields.get("property_type_specific"),
+        
+        # 發布者資訊
         "agent_name": agent_name,
         "agent_phone": agent_phone,
         "posted_at": nd_fields.get("posted_at"),
         "description": desc or None,
-        "image_urls": images[:8],
+        "image_urls": images,
+        
+        # 【重要】動態屬性池：若頁面出現設施、周邊或全新自定義標籤，皆會被封裝在此處
+        "raw_attributes": nd_fields.get("raw_attributes", {})
     }
 
 
@@ -369,7 +360,6 @@ async def scrape_region_type(
     *,
     on_progress: Optional[Callable[[str], Awaitable[None]]] = None,
 ) -> List[Dict]:
-    """Scrape Mudah.my for one (region,type) up to target_count listings."""
     if target_count <= 0:
         return []
 

@@ -77,7 +77,7 @@ def _score_one(row: Dict, brief: Dict) -> Dict[str, float]:
     region = (row.get("region") or "").lower()
 
     # location fit: target string contains region/area tokens
-    loc_area = (row.get("location_area") or "").lower()
+    loc_area = (row.get("location") or "").lower()
     location_fit = 0.0
     for token in {region, loc_area, *target_text.split()}:
         if token and len(token) > 2 and token in target_text:

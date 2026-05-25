@@ -2,9 +2,39 @@
 Core data models and types.
 Pydantic v2 validation for all LLM outputs and API contracts.
 """
-from typing import Optional, Literal, Any
+from typing import Optional, Literal, Any, List, Dict
 from datetime import datetime
 from pydantic import BaseModel, Field
+
+
+# ─── Scraped Property Data (from Mudah Scraper) ──────────────────────
+class ScrapedProperty(BaseModel):
+    listing_url: str
+    list_id: Optional[str] = None
+    source: str
+    scraped_at: str  # ISO format datetime string
+    title: Optional[str] = None
+    price: Optional[float] = None
+    currency: Optional[str] = None
+    property_type: Optional[str] = None
+    category_name: Optional[str] = None
+    region: Optional[str] = None
+    location_area: Optional[str] = None
+    city: Optional[str] = None
+    bedrooms: Optional[int] = None
+    bathrooms: Optional[int] = None
+    built_up_sqft: Optional[int] = None
+    land_sqft: Optional[int] = None
+    tenure: Optional[str] = None
+    furnishing: Optional[str] = None
+    land_title: Optional[str] = None
+    property_type_specific: Optional[str] = None
+    agent_name: Optional[str] = None
+    agent_phone: Optional[str] = None
+    posted_at: Optional[str] = None  # ISO format datetime string
+    description: Optional[str] = None
+    image_urls: List[str] = Field(default_factory=list)
+    raw_attributes: Dict[str, Any] = Field(default_factory=dict)
 
 
 # ─── Phase 1 ───────────────────────────────────────────────────────
@@ -55,35 +85,20 @@ class NPPSession(BaseModel):
 
 # ─── Property & Search ──────────────────────────────────────────────
 class Property(BaseModel):
-    property_id: str
-    title: str
-    price: float
-    location: str
-    administrative_district: str
-    distance_to_mrt_km: float
-    is_gated_guarded: bool
-    security_level: Literal["high", "medium", "low"]
-    facilities: list[str]
-    facilities_score: float
-    nearby_schools: int
-    nearby_tuition_centers: int
-    nearby_malls: int
-    nearby_clinics: int
-    lifestyle_proximity_score: float
-    maintenance_fee_per_sqft: float
-    normalized_maintenance_fee: float
-    flood_risk: Literal["high", "medium", "low", "unknown"]
-    feature_tags: list[str]  # NPP_ENUM internal keys
-    price_fit_score: float
-    security_score: float
-    transit_proximity_score: float
-    floor_level: int
-    facing: str
-    bedrooms: int
-    bathrooms: int
-    url: str
-    source: str
-    is_mock: bool
+    # This model represents a property *after* scraping and initial processing.
+    # It embeds the raw scraped data and adds derived/computed fields.
+    property_id: str = Field(description="Unique ID for the property, usually from the listing_url")
+    scraped_data: ScrapedProperty = Field(description="Raw data scraped from Mudah.my")
+
+    # Derived fields from ranking agent / enrichment pipeline
+    feature_tags: List[str] = Field(default_factory=list, description="NPP_ENUM internal keys derived from description")
+    price_fit_score: float = Field(0.0, description="Score for how well the price fits the user's budget")
+    security_score: float = Field(0.0, description="Score for security features")
+    transit_proximity_score: float = Field(0.0, description="Score for proximity to public transit")
+    lifestyle_proximity_score: float = Field(0.0, description="Score for proximity to lifestyle amenities")
+    facilities_score: float = Field(0.0, description="Score for available facilities")
+    normalized_maintenance_fee: float = Field(0.0, description="Maintenance fee normalized for comparison")
+    is_mock: bool = Field(False, description="True if this is a mock property for demo purposes")
 
 
 class PropertyRemark(BaseModel):
