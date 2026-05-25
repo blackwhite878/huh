@@ -20,6 +20,8 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from schemas import ScrapedProperty
+
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR    = BACKEND_DIR / "data"     / "states"
 TEMPO_DIR   = BACKEND_DIR / "tempo_data" / "states"
@@ -171,42 +173,42 @@ def tempo_path(region: str, session_id: str) -> Path:
     return TEMPO_DIR / f"{region}__{session_id}.json"
 
 
-def write_tempo(region: str, session_id: str, rows: List[Dict]) -> Path:
+def write_tempo(region: str, session_id: str, rows: List[ScrapedProperty]) -> Path:
     p = tempo_path(region, session_id)
     with _write_lock, p.open("w", encoding="utf-8") as f:
-        json.dump({"region": region, "session_id": session_id, "rows": rows},
+        json.dump({"region": region, "session_id": session_id, "rows": [r.model_dump() for r in rows]},
                   f, ensure_ascii=False, indent=2)
     return p
 
 
-def append_tempo(region: str, session_id: str, rows: List[Dict]) -> int:
+def append_tempo(region: str, session_id: str, rows: List[ScrapedProperty]) -> int:
     existing = read_tempo(region, session_id)
     existing_urls = {r.get("listing_url") for r in existing if r.get("listing_url")}
     merged = list(existing)
     added = 0
     seen_in_batch: set = set()
     for r in rows:
-        url = r.get("listing_url")
+        url = r.listing_url  # Access directly from ScrapedProperty
         if not url or url in existing_urls or url in seen_in_batch:
             continue
         seen_in_batch.add(url)
-        merged.append(r)
+        merged.append(r.model_dump()) # Append dict representation
         added += 1
     if added:
-        write_tempo(region, session_id, merged)
+        write_tempo(region, session_id, [ScrapedProperty(**r) for r in merged]) # Re-validate on write
     return added
 
 
-def read_tempo(region: str, session_id: str) -> List[Dict]:
+def read_tempo(region: str, session_id: str) -> List[ScrapedProperty]:
     p = tempo_path(region, session_id)
     if not p.exists():
         return []
     with p.open("r", encoding="utf-8") as f:
         data = json.load(f)
-    return data.get("rows", [])
+    return [ScrapedProperty(**r) for r in data.get("rows", [])]
 
 
-# ─── ranked JSON ───────────────────────────────────────────────────
+# ─── ranked JSON (top-10 output of ranking agent) ──────────────────
 def ranked_path(session_id: str) -> Path:
     _ensure_dirs()
     return RANKED_DIR / f"{session_id}.json"

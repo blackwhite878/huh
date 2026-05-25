@@ -111,7 +111,16 @@ def build_top10(
         (compute_weighted_score(p, weight_vector), p, "tier_1")
         for p in tier1_pool
     ]
-    scored_tier1.sort(reverse=True)
+    # Sort by score primarily; use price and property_id for safe tie-breaking
+    # to prevent Pydantic Property objects from causing TypeError on ties.
+    scored_tier1.sort(
+        key=lambda x: (
+            x[0],
+            -x[1].scraped_data.price if getattr(x[1], "scraped_data", None) and getattr(x[1].scraped_data, "price", None) is not None else 0,
+            getattr(x[1], "property_id", ""),
+        ),
+        reverse=True,
+    )
 
     if len(scored_tier1) >= 10:
         return scored_tier1[:10]
@@ -122,7 +131,24 @@ def build_top10(
         (compute_weighted_score(p, weight_vector), p, "tier_2")
         for p in tier2_pool
     ]
-    scored_tier2.sort(reverse=True)
+    scored_tier2.sort(
+        key=lambda x: (
+            x[0],
+            -x[1].scraped_data.price if getattr(x[1], "scraped_data", None) and getattr(x[1].scraped_data, "price", None) is not None else 0,
+            getattr(x[1], "property_id", ""),
+        ),
+        reverse=True,
+    )
 
-    return scored_tier1 + scored_tier2[:needed]
-
+    # Merge and re-sort so a high-scoring Tier 2 entry can outrank a
+    # low-scoring Tier 1 entry (policy: rank by score across tiers).
+    combined = scored_tier1 + scored_tier2[:needed]
+    combined.sort(
+        key=lambda x: (
+            x[0],
+            -x[1].scraped_data.price if getattr(x[1], "scraped_data", None) and getattr(x[1].scraped_data, "price", None) is not None else 0,
+            getattr(x[1], "property_id", ""),
+        ),
+        reverse=True,
+    )
+    return combined
