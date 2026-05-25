@@ -4,26 +4,20 @@ import { useAppStore } from "@/lib/store";
 import { api, getClosedSessionReason, type ChatContext } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { ThinkingBubble } from "./ThinkingBubble";
+import { t, type Lang } from "@/lib/i18n";
 
-// When the LLM signals it has enough context via fc_trigger (which manifests
-// as status="searching" from the backend), we show a popup notifying the user
-// and auto-redirect to SEARCHING after AUTO_REDIRECT_MS. This is driven by
-// the LLM's decision, not a hardcoded message count.
 const AUTO_REDIRECT_MS = 3000;
 
-// Human-readable labels for fields that may appear in a conflict.
-const FIELD_LABELS: Record<string, string> = {
-  budget: "budget",
-  target: "target",
-  identity: "identity",
-  gender: "gender",
-  agent_style: "agent style",
-  house_type: "house type",
-  location: "location",
-  description: "description",
-  bedrooms: "bedrooms",
-  bathrooms: "bathrooms",
-};
+const FIELD_KEYS = [
+  "budget", "target", "identity", "gender", "agent_style",
+  "house_type", "location", "description", "bedrooms", "bathrooms",
+] as const;
+
+function fieldLabel(field: string, lang: Lang): string {
+  return (FIELD_KEYS as readonly string[]).includes(field)
+    ? t(`field.${field}`, lang)
+    : field;
+}
 
 function formatValue(v: unknown): string {
   if (v === null || v === undefined || v === "") return "—";
@@ -52,9 +46,6 @@ export function Conversation() {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
-  // Triggered when backend responds with status="searching" (LLM decided enough
-  // context). Shows popup to notify user before auto-redirect. `dismissed`
-  // ensures it shows only once per session.
   const [readyPopup, setReadyPopup] = useState<{
     open: boolean;
     countdown: number;
@@ -67,8 +58,8 @@ export function Conversation() {
     (reason: "offline" | "restarted") => {
       const msg =
         reason === "offline"
-          ? "Connection lost — your session has been closed. Please start over. / 连接中断，会话已关闭，请重新开始。"
-          : "The server was restarted and your session is no longer available. Local memory has been cleared. / 服务器已重启，原会话已失效，本机暂存已清除，请重新开始。";
+          ? t("p2.deadsession.offline", lang)
+          : t("p2.deadsession.restarted", lang);
       setInput("");
       setSending(false);
       setRetryCount(0);
@@ -85,7 +76,7 @@ export function Conversation() {
       }
       resetAll();
     },
-    [resetAll],
+    [resetAll, lang],
   );
 
   const locked =
@@ -98,9 +89,6 @@ export function Conversation() {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages.length, pendingConflict, sending]);
 
-  // Trigger ready-to-search popup when backend responds with status="searching"
-  // (which sets appState to SEARCHING). The LLM's fc_trigger decision determines
-  // when this happens, not a hardcoded message count. Fires once.
   useEffect(() => {
     if (readyPopup.dismissed || readyPopup.open) return;
     if (appState !== "SEARCHING") return;
@@ -111,7 +99,6 @@ export function Conversation() {
     });
   }, [appState, readyPopup]);
 
-  // Drive the popup countdown and auto-redirect to SEARCHING.
   useEffect(() => {
     if (!readyPopup.open) return;
     const tick = setInterval(() => {
@@ -119,9 +106,6 @@ export function Conversation() {
         if (!s.open) return s;
         const next = s.countdown - 1;
         if (next <= 0) {
-          // Auto-redirect: ask the backend to start searching by sending
-          // a synthetic "ready" message. The backend pipeline kicks in
-          // via fc_trigger and the SEARCHING screen takes over.
           void triggerSearch();
           return { open: false, countdown: 0, dismissed: true };
         }
@@ -132,10 +116,6 @@ export function Conversation() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [readyPopup.open]);
 
-  // Build a Known-Facts block from Phase 1 + Phase 1.5 + everything the
-  // user has already said in Phase 2. We do not summarise the dialogue
-  // (that would hallucinate facts) — we pass it verbatim and let the
-  // backend prompt builder treat it as authoritative context.
   const chatContext: ChatContext | null = useMemo(() => {
     if (!phase1Form) return null;
     const userTurns = messages
@@ -167,21 +147,12 @@ export function Conversation() {
     };
   }, [phase1Form, semanticTags, messages, lang]);
 
-  // ───────────────────────────────────────────────────────────────
-  // Proactive Phase 2 opener.
-  //
-  // When the user enters CHATTING with an empty transcript, ask the
-  // backend to generate the first question. We show ThinkingBubble
-  // (via `sending`) while waiting so the user sees the LLM "thinking"
-  // animation instead of an empty box. Guarded so it fires at most
-  // once per session (a ref protects against React StrictMode double
-  // mounts; the backend is also idempotent on its side).
   useEffect(() => {
     if (openerStartedRef.current) return;
     if (appState !== "CHATTING") return;
     if (!sessionId) return;
-    if (messages.length > 0) return;     // existing transcript — don't re-open
-    if (!chatContext) return;            // wait until Phase 1 facts are ready
+    if (messages.length > 0) return;
+    if (!chatContext) return;
     if (sending) return;
 
     openerStartedRef.current = true;
@@ -199,8 +170,6 @@ export function Conversation() {
           handleDeadSession(closedReason);
           return;
         }
-        // Re-arm so a manual user message can implicitly recover; the
-        // backend chat() will still have full Phase 1 context.
         openerStartedRef.current = false;
       } finally {
         setSending(false);
@@ -213,12 +182,10 @@ export function Conversation() {
     try {
       const res = await api.chat(
         sessionId,
-        "I've shared enough. Please start searching for matches now.",
+        t("p2.auto_search_request", lang),
         chatContext ?? undefined,
       );
       appendMessage({ role: "assistant", content: res.reply });
-      // Whatever the backend decided, force SEARCHING so the user is not
-      // stranded on the chat screen after the popup.
       setAppState("SEARCHING");
     } catch (e) {
       console.warn("[chat:auto-search] failed", e);
@@ -227,7 +194,6 @@ export function Conversation() {
         handleDeadSession(closedReason);
         return;
       }
-      // On failure, leave the user in chat so they can retry manually.
     }
   };
 
@@ -239,7 +205,6 @@ export function Conversation() {
     setSending(true);
     setRetryCount(0);
 
-    // Retry logic with exponential backoff
     const maxRetries = 5;
     let lastError: Error | null = null;
 
@@ -259,7 +224,7 @@ export function Conversation() {
         }
         setRetryCount(0);
         setSending(false);
-        return; // Success
+        return;
       } catch (e) {
         lastError = e instanceof Error ? e : new Error(String(e));
         const closedReason = getClosedSessionReason(e);
@@ -269,14 +234,12 @@ export function Conversation() {
         }
         const errorStatus = (lastError as { status?: number }).status;
 
-        // Only retry for server errors (5xx)
         if (
           typeof errorStatus === "number" &&
           errorStatus >= 500 &&
           errorStatus < 600 &&
           attempt < maxRetries
         ) {
-          // Calculate exponential backoff: 1s, 2s, 4s, 8s, 16s
           const delayMs = Math.pow(2, attempt) * 1000;
           setRetryCount(attempt + 1);
           console.warn(
@@ -285,12 +248,10 @@ export function Conversation() {
           );
           await new Promise((resolve) => setTimeout(resolve, delayMs));
         } else {
-          // For client errors (4xx) or other non-retryable errors, or if max retries reached
           console.error("[chat] non-retryable error or max retries exhausted:", lastError);
           appendMessage({
             role: "assistant",
-            content:
-              "Sorry, I encountered an error and couldn't process your request. Please try again.",
+            content: t("p2.error.generic", lang),
           });
           setSending(false);
           return;
@@ -298,19 +259,15 @@ export function Conversation() {
       }
     }
 
-    // All retries exhausted (should only be reached for 5xx errors if maxRetries is hit)
     console.error("[chat] all retries exhausted:", lastError);
     handleDeadSession("offline");
   };
 
-  // Conflict resolution.
-  // - accept = true  → call /update_requirements with proposed_value.
-  // - accept = false → "opposite" action = keep the original value
-  //   already on file. No backend call; we just close the popup.
   const confirmConflict = async (accept: boolean) => {
     if (!pendingConflict || !sessionId) return;
     const field = pendingConflict.conflicting_field;
     const prev = (phase1Form as unknown as Record<string, unknown> | null)?.[field];
+    const fLabel = fieldLabel(field, lang);
     if (accept) {
       try {
         await api.updateRequirements(sessionId, {
@@ -318,9 +275,11 @@ export function Conversation() {
         });
         appendMessage({
           role: "assistant",
-          content: `Updated ${FIELD_LABELS[field] ?? field} from ${formatValue(prev)} to ${formatValue(
-            pendingConflict.proposed_value,
-          )}.`,
+          content: t("p2.conflict.msg.updated", lang, {
+            field: fLabel,
+            prev: formatValue(prev),
+            next: formatValue(pendingConflict.proposed_value),
+          }),
         });
       } catch (e) {
         console.warn(e);
@@ -328,7 +287,10 @@ export function Conversation() {
     } else {
       appendMessage({
         role: "assistant",
-        content: `Kept ${FIELD_LABELS[field] ?? field} as ${formatValue(prev)}.`,
+        content: t("p2.conflict.msg.kept", lang, {
+          field: fLabel,
+          prev: formatValue(prev),
+        }),
       });
     }
     setPendingConflict(null);
@@ -340,16 +302,15 @@ export function Conversation() {
       <div className="mb-4 flex items-center justify-between">
         <div>
           <h2 className="text-xl font-semibold tracking-tight">
-            Live consultation
+            {t("p2.title", lang)}
           </h2>
           <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-            Phase 2 : Deep Chatting
+            {t("p2.subtitle", lang)}
           </p>
         </div>
       </div>
 
       <div className="glass-strong relative flex flex-1 flex-col overflow-hidden rounded-3xl border border-border shadow-[var(--shadow-elegant)]">
-        {/* Message list */}
         <div className="flex-1 space-y-5 overflow-y-auto px-6 py-6">
           {messages.map((m, i) => (
             <MessageBubble key={i} role={m.role} content={m.content} />
@@ -369,13 +330,13 @@ export function Conversation() {
               reply={pendingConflict.reply}
               onAccept={() => confirmConflict(true)}
               onReject={() => confirmConflict(false)}
+              lang={lang}
             />
           )}
 
           <div ref={endRef} />
         </div>
 
-        {/* Composer */}
         <div className="border-t border-border/60 bg-surface/40 p-4">
           <div
             className={[
@@ -399,8 +360,8 @@ export function Conversation() {
               maxLength={600}
               placeholder={
                 locked
-                  ? "Input locked while the agent works…"
-                  : "Type your message…"
+                  ? t("p2.input.locked", lang)
+                  : t("p2.input.placeholder", lang)
               }
               className="flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
             />
@@ -413,7 +374,7 @@ export function Conversation() {
                     ? "text-amber-500"
                     : "text-muted-foreground/70",
               ].join(" ")}
-              aria-label="character count"
+              aria-label={t("p2.input.char_count_aria", lang)}
             >
               {input.length}/600
             </span>
@@ -435,6 +396,7 @@ export function Conversation() {
           onStayChat={() =>
             setReadyPopup({ open: false, countdown: 0, dismissed: true })
           }
+          lang={lang}
         />
       )}
     </div>
@@ -448,6 +410,7 @@ function ConflictCard({
   reply,
   onAccept,
   onReject,
+  lang,
 }: {
   field: string;
   previousValue: unknown;
@@ -455,30 +418,33 @@ function ConflictCard({
   reply: string;
   onAccept: () => void;
   onReject: () => void;
+  lang: Lang;
 }) {
-  const label = FIELD_LABELS[field] ?? field;
+  const label = fieldLabel(field, lang);
   const prev = formatValue(previousValue);
   const next = formatValue(proposedValue);
   return (
     <div className="flex animate-in fade-in slide-in-from-bottom-2 justify-start">
       <div className="max-w-[85%] rounded-2xl rounded-tl-sm border border-warning/30 bg-warning/10 p-4">
         <div className="mb-3 font-mono text-[10px] uppercase tracking-[0.18em] text-warning">
-          Conflict : {field}
+          {t("p2.conflict.badge", lang)} : {label}
         </div>
         <p className="mb-3 text-sm text-foreground">{reply}</p>
         <div className="mb-4 rounded-lg border border-warning/20 bg-background/60 p-3 text-xs text-foreground/90">
           <div>
             <span className="font-mono uppercase tracking-wider text-muted-foreground">
-              Yes →
+              {t("p2.conflict.yes", lang)}
             </span>{" "}
-            update <strong>{label}</strong> from <code>{prev}</code> to{" "}
-            <code>{next}</code>.
+            {t("p2.conflict.update.prefix", lang)} <strong>{label}</strong>{" "}
+            {t("p2.conflict.update.from", lang)} <code>{prev}</code>{" "}
+            {t("p2.conflict.update.to", lang)} <code>{next}</code>.
           </div>
           <div className="mt-1">
             <span className="font-mono uppercase tracking-wider text-muted-foreground">
-              No →
+              {t("p2.conflict.no", lang)}
             </span>{" "}
-            keep <strong>{label}</strong> as <code>{prev}</code>.
+            {t("p2.conflict.keep.prefix", lang)} <strong>{label}</strong>{" "}
+            {t("p2.conflict.keep.as", lang)} <code>{prev}</code>.
           </div>
         </div>
         <div className="flex gap-2">
@@ -487,7 +453,7 @@ function ConflictCard({
             onClick={onAccept}
             className="h-8 rounded-lg bg-primary text-primary-foreground"
           >
-            <Check className="mr-1 h-3.5 w-3.5" /> Yes, update
+            <Check className="mr-1 h-3.5 w-3.5" /> {t("p2.conflict.btn.accept", lang)}
           </Button>
           <Button
             size="sm"
@@ -495,7 +461,7 @@ function ConflictCard({
             onClick={onReject}
             className="h-8 rounded-lg"
           >
-            <X className="mr-1 h-3.5 w-3.5" /> Keep original
+            <X className="mr-1 h-3.5 w-3.5" /> {t("p2.conflict.btn.reject", lang)}
           </Button>
         </div>
       </div>
@@ -506,9 +472,11 @@ function ConflictCard({
 function ReadyToSearchPopup({
   countdown,
   onStayChat,
+  lang,
 }: {
   countdown: number;
   onStayChat: () => void;
+  lang: Lang;
 }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/60 backdrop-blur-sm">
@@ -518,16 +486,16 @@ function ReadyToSearchPopup({
             <Sparkles className="h-4 w-4" />
           </div>
           <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-primary">
-            ready · enough context
+            {t("p2.popup.badge", lang)}
           </div>
         </div>
         <h3 className="mb-2 text-lg font-semibold tracking-tight">
-          We have what we need.
+          {t("p2.popup.title", lang)}
         </h3>
         <p className="mb-4 text-sm text-muted-foreground">
-          Redirecting to property search in{" "}
+          {t("p2.popup.redirect", lang)}{" "}
           <span className="font-mono font-semibold text-foreground">
-            {countdown}s
+            {countdown}{t("p2.popup.seconds", lang)}
           </span>
           …
         </p>
@@ -538,7 +506,7 @@ function ReadyToSearchPopup({
             onClick={onStayChat}
             className="h-8 rounded-lg"
           >
-            Stay & chat more
+            {t("p2.popup.stay", lang)}
           </Button>
         </div>
       </div>

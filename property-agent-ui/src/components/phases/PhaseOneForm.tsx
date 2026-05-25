@@ -13,24 +13,14 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { t } from "@/lib/i18n";
 
-const IDENTITIES: { value: Identity; label: string; hint: string }[] = [
-  { value: "first_time_buyer", label: "First-time Buyer", hint: "Budget-focused" },
-  { value: "investor", label: "Investor", hint: "Yield-driven" },
-  { value: "upgrader", label: "Upgrader", hint: "Lifestyle-focused" },
-];
-const GENDERS: { value: Gender; label: string }[] = [
-  { value: "female", label: "Female" },
-  { value: "male", label: "Male" },
-  { value: "prefer_not_to_say", label: "Prefer not to say" },
-];
-const STYLES: { value: AgentStyle; label: string; hint: string }[] = [
-  { value: "Professional", label: "Professional", hint: "Crisp · advisory" },
-  { value: "Friendly", label: "Friendly", hint: "Warm · conversational" },
-  { value: "Enthusiastic", label: "Enthusiastic", hint: "Punchy · proactive" },
-];
+const IDENTITY_VALUES: Identity[] = ["first_time_buyer", "investor", "upgrader"];
+const GENDER_VALUES: Gender[] = ["female", "male", "prefer_not_to_say"];
+const STYLE_VALUES: AgentStyle[] = ["Professional", "Friendly", "Enthusiastic"];
 
 export function PhaseOneForm() {
+  const lang = useAppStore((s) => s.lang);
   const setSessionId = useAppStore((s) => s.setSessionId);
   const setPhase1Form = useAppStore((s) => s.setPhase1Form);
   const setAppState = useAppStore((s) => s.setAppState);
@@ -43,7 +33,6 @@ export function PhaseOneForm() {
     identity: "first_time_buyer",
     gender: "prefer_not_to_say",
     description: "",
-    // Backend-only fields (no Phase 1 UI). Sent as empty string when unknown.
     house_type: "",
     location: "",
   });
@@ -66,8 +55,8 @@ export function PhaseOneForm() {
       console.error(e);
       setError(
         e instanceof Error
-          ? `Couldn't reach the agent backend: ${e.message}`
-          : "Couldn't reach the agent backend. Please try again.",
+          ? `${t("p1.error.prefix", lang)} ${e.message}`
+          : t("p1.error", lang),
       );
     } finally {
       setSubmitting(false);
@@ -80,20 +69,28 @@ export function PhaseOneForm() {
       <div className="mb-10 max-w-2xl">
         <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-border bg-surface-raised/60 px-3 py-1 font-mono text-[10px] uppercase tracking-[0.2em] text-muted-foreground backdrop-blur">
           <Sparkles className="h-3 w-3 text-primary" />
-          Phase 1 · structured profiling
+          {t("p1.badge", lang)}
         </div>
         <h1 className="text-balance text-4xl font-semibold leading-[1.05] tracking-tight md:text-5xl">
-          Tell us what <span className="text-gradient">home</span> means
-          <br />
-          to you.
+          {lang === "en" ? (
+            <>
+              {t("p1.title.a", lang)} <span className="text-gradient">{t("p1.title.home", lang)}</span> {t("p1.title.b", lang)}
+              <br />
+              {t("p1.title.c", lang)}
+            </>
+          ) : (
+            <>
+              {t("p1.title.a", lang)}
+              <span className="text-gradient">{t("p1.title.home", lang)}</span>
+              {t("p1.title.b", lang)}
+            </>
+          )}
         </h1>
         <p className="mt-4 max-w-lg text-base leading-relaxed text-muted-foreground">
-          A few quick details so the AI can build your personalised property
-          profile. We&apos;ll align on semantics in the background.
+          {t("p1.subtitle", lang)}
         </p>
       </div>
 
-      {/* Form card */}
       <div className="glass-strong relative overflow-hidden rounded-3xl border border-border shadow-[var(--shadow-elegant)]">
         <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/50 to-transparent" />
 
@@ -101,7 +98,7 @@ export function PhaseOneForm() {
           {/* Budget */}
           <div className="space-y-2.5">
             <Label className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-              Budget (RM)
+              {t("p1.label.budget", lang)}
             </Label>
             <Input
               type="number"
@@ -113,28 +110,28 @@ export function PhaseOneForm() {
                 setForm({ ...form, budget: Number(e.target.value) || 0 })
               }
               className="h-12 rounded-xl border-border-strong bg-surface-raised/80 text-lg font-medium tabular-nums"
-              placeholder="500,000"
+              placeholder={t("p1.placeholder.budget", lang)}
             />
           </div>
 
           {/* Target */}
           <div className="space-y-2.5">
             <Label className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-              Target area
+              {t("p1.label.target", lang)}
             </Label>
             <Input
               value={form.target}
               onChange={(e) => setForm({ ...form, target: e.target.value })}
               className="h-12 rounded-xl border-border-strong bg-surface-raised/80 text-base"
-              placeholder="e.g. Johor Bahru"
+              placeholder={t("p1.placeholder.target", lang)}
             />
           </div>
 
-          {/* Description — free text for semantic alignment */}
+          {/* Description */}
           <div className="space-y-2.5 md:col-span-2">
             <div className="flex items-baseline justify-between">
               <Label className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-                What features are must-haves, dealbreakers, or nice-to-haves? (at least 10 characters)
+                {t("p1.label.description", lang)}
               </Label>
               <span className="font-mono text-[10px] tabular-nums text-muted-foreground/70">
                 {form.description.trim().length}/600
@@ -147,27 +144,26 @@ export function PhaseOneForm() {
               }
               rows={4}
               className="min-h-[112px] rounded-xl border-border-strong bg-surface-raised/80 text-[15px] leading-relaxed placeholder:text-muted-foreground/60"
-              placeholder="e.g. Car park, must have security, prefer high floor and close to MRT. Avoid noisy main roads."
+              placeholder={t("p1.placeholder.description", lang)}
             />
             <p className="font-mono text-[10px] uppercase tracking-[0.15em] text-muted-foreground/70">
-              Use to generate preference tags during semantic alignment.
+              {t("p1.hint.description", lang)}
             </p>
           </div>
-
 
           {/* Identity */}
           <div className="space-y-2.5 md:col-span-2">
             <Label className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-              Buyer identity
+              {t("p1.label.identity", lang)}
             </Label>
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-              {IDENTITIES.map((it) => (
+              {IDENTITY_VALUES.map((v) => (
                 <Choice
-                  key={it.value}
-                  active={form.identity === it.value}
-                  onClick={() => setForm({ ...form, identity: it.value })}
-                  label={it.label}
-                  hint={it.hint}
+                  key={v}
+                  active={form.identity === v}
+                  onClick={() => setForm({ ...form, identity: v })}
+                  label={t(`p1.identity.${v}`, lang)}
+                  hint={t(`p1.identity.${v}.hint`, lang)}
                 />
               ))}
             </div>
@@ -176,15 +172,15 @@ export function PhaseOneForm() {
           {/* Gender */}
           <div className="space-y-2.5">
             <Label className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-              Gender
+              {t("p1.label.gender", lang)}
             </Label>
             <div className="grid grid-cols-3 gap-2">
-              {GENDERS.map((g) => (
+              {GENDER_VALUES.map((v) => (
                 <Choice
-                  key={g.value}
-                  active={form.gender === g.value}
-                  onClick={() => setForm({ ...form, gender: g.value })}
-                  label={g.label}
+                  key={v}
+                  active={form.gender === v}
+                  onClick={() => setForm({ ...form, gender: v })}
+                  label={t(`p1.gender.${v}`, lang)}
                   compact
                 />
               ))}
@@ -194,16 +190,16 @@ export function PhaseOneForm() {
           {/* Style */}
           <div className="space-y-2.5">
             <Label className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-              Agent Personalities
+              {t("p1.label.style", lang)}
             </Label>
             <div className="grid grid-cols-3 gap-2">
-              {STYLES.map((s) => (
+              {STYLE_VALUES.map((v) => (
                 <Choice
-                  key={s.value}
-                  active={form.agent_style === s.value}
-                  onClick={() => setForm({ ...form, agent_style: s.value })}
-                  label={s.label}
-                  hint={s.hint}
+                  key={v}
+                  active={form.agent_style === v}
+                  onClick={() => setForm({ ...form, agent_style: v })}
+                  label={t(`p1.style.${v}`, lang)}
+                  hint={t(`p1.style.${v}.hint`, lang)}
                   compact
                 />
               ))}
@@ -220,14 +216,14 @@ export function PhaseOneForm() {
         <div className="flex items-center justify-between gap-4 border-t border-border/60 bg-surface/40 px-8 py-5 md:px-10">
           <div className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
             <Building2 className="h-3.5 w-3.5" />
-            5 fields
+            {t("p1.fields", lang)}
           </div>
           <Button
             onClick={submit}
             disabled={!valid || submitting}
             className="group h-11 rounded-xl bg-gradient-to-br from-primary to-primary-glow px-6 text-sm font-medium text-primary-foreground shadow-[var(--shadow-glow)] transition-all hover:translate-y-[-1px]"
           >
-            {submitting ? "Initialising…" : "Build my profile"}
+            {submitting ? t("p1.cta.loading", lang) : t("p1.cta", lang)}
             <ArrowRight className="ml-1.5 h-4 w-4 transition-transform group-hover:translate-x-0.5" />
           </Button>
         </div>

@@ -13,8 +13,10 @@ import { api } from "@/lib/api";
 import type { PropertyResult } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { t, type Lang } from "@/lib/i18n";
 
 export function ResultsBatch() {
+  const lang = useAppStore((s) => s.lang);
   const appState = useAppStore((s) => s.appState);
   const sessionId = useAppStore((s) => s.sessionId);
   const results = useAppStore((s) => s.currentBatch);
@@ -42,7 +44,6 @@ export function ResultsBatch() {
 
   const reject = async (propertyId: string, reason: string) => {
     if (!sessionId) return;
-    // Optimistically mark rejected so UI stays in sync with store.
     addRejectedId(propertyId);
     try {
       const data = await api.rejectSingle(sessionId, propertyId, reason);
@@ -63,23 +64,24 @@ export function ResultsBatch() {
 
   return (
     <div>
-      {/* Header */}
       <div className="mb-8 flex items-end justify-between gap-4">
         <div>
           <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-border bg-surface-raised/60 px-3 py-1 font-mono text-[10px] uppercase tracking-[0.2em] text-muted-foreground backdrop-blur">
             <Sparkles className="h-3 w-3 text-primary" />
-            batch {batchIndex || 1} · {results.length} of {totalAvailable}
+            {t("results.batch", lang)} {batchIndex || 1}
+            {t("results.batch.suffix", lang)} · {results.length} {t("results.of", lang)} {totalAvailable}
           </div>
           <h2 className="text-3xl font-semibold tracking-tight md:text-4xl">
-            Curated <span className="text-gradient">matches</span>
+            {t("results.title.a", lang)}{" "}
+            <span className="text-gradient">{t("results.title.b", lang)}</span>
           </h2>
           <p className="mt-2 text-sm text-muted-foreground">
-            Ranked by your weighted preference profile.
+            {t("results.subtitle", lang)}
             {rejectionCount > 0 && (
               <>
                 {" "}
                 <span className="font-mono text-xs">
-                  · {rejectionCount} declined
+                  · {rejectionCount} {t("results.declined", lang)}
                 </span>
               </>
             )}
@@ -90,10 +92,7 @@ export function ResultsBatch() {
       {degraded && (
         <div className="mb-6 flex items-start gap-2.5 rounded-xl border border-warning/40 bg-warning/10 p-3 text-sm">
           <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-warning" />
-          <span className="text-foreground/80">
-            AI analysis is temporarily unavailable — results are sorted by
-            weighted scoring only.
-          </span>
+          <span className="text-foreground/80">{t("results.degraded", lang)}</span>
         </div>
       )}
 
@@ -105,6 +104,7 @@ export function ResultsBatch() {
             degraded={degraded}
             rejected={rejectedIds.includes(p.property_id)}
             onReject={reject}
+            lang={lang}
           />
         ))}
       </div>
@@ -115,7 +115,7 @@ export function ResultsBatch() {
             onClick={fetchNext}
             className="group h-11 rounded-xl bg-gradient-to-br from-primary to-primary-glow px-6 text-sm font-medium text-primary-foreground shadow-[var(--shadow-glow)]"
           >
-            View more matches
+            {t("results.cta.next", lang)}
             <ArrowRight className="ml-1.5 h-4 w-4 transition-transform group-hover:translate-x-0.5" />
           </Button>
         </div>
@@ -129,11 +129,13 @@ function PropertyCard({
   degraded,
   rejected,
   onReject,
+  lang,
 }: {
   property: PropertyResult;
   degraded: boolean;
   rejected: boolean;
   onReject: (id: string, reason: string) => void;
+  lang: Lang;
 }) {
   const [open, setOpen] = useState(false);
   const [reason, setReason] = useState("");
@@ -141,14 +143,13 @@ function PropertyCard({
   if (rejected) {
     return (
       <div className="rounded-2xl border border-dashed border-border bg-surface/40 p-6 text-center text-sm text-muted-foreground">
-        Removed from list — your feedback was recorded.
+        {t("results.removed", lang)}
       </div>
     );
   }
 
   return (
     <div className="glass-strong group relative overflow-hidden rounded-2xl border border-border shadow-[var(--shadow-elegant)] transition-all hover:translate-y-[-2px] hover:shadow-[var(--shadow-glow)]">
-      {/* Image area */}
       <div className="relative aspect-[16/10] overflow-hidden bg-gradient-to-br from-accent to-muted">
         {property.image_url ? (
           // eslint-disable-next-line @next/next/no-img-element
@@ -171,7 +172,9 @@ function PropertyCard({
                 : "bg-warning/85 text-warning-foreground",
             ].join(" ")}
           >
-            {property.tier === "tier_1" ? "Perfect fit" : "Near match"}
+            {property.tier === "tier_1"
+              ? t("results.tier_1", lang)
+              : t("results.tier_2", lang)}
           </span>
         </div>
       </div>
@@ -195,31 +198,30 @@ function PropertyCard({
 
         {property.feature_tags.length > 0 && (
           <div className="flex flex-wrap gap-1.5">
-            {property.feature_tags.slice(0, 4).map((t) => (
+            {property.feature_tags.slice(0, 4).map((tag) => (
               <span
-                key={t}
+                key={tag}
                 className="rounded-full border border-border bg-surface/60 px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground"
               >
-                {t}
+                {tag}
               </span>
             ))}
           </div>
         )}
 
-        {/* AI remarks */}
         <div className="rounded-xl border border-border bg-surface/50 p-3">
           {degraded ? (
             <div className="flex items-center gap-2 text-xs text-warning-foreground/80">
               <AlertTriangle className="h-3.5 w-3.5 text-warning" />
-              AI analysis temporarily unavailable
+              {t("results.degraded_card", lang)}
             </div>
           ) : (
             <>
               <div className="mb-1 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.18em] text-primary">
-                <Sparkles className="h-3 w-3" /> AI Remarks
+                <Sparkles className="h-3 w-3" /> {t("results.ai_remarks", lang)}
               </div>
               <p className="text-sm leading-relaxed text-foreground/80">
-                {property.ai_remarks ?? "Analysis pending."}
+                {property.ai_remarks ?? t("results.analysis_pending", lang)}
               </p>
             </>
           )}
@@ -227,26 +229,27 @@ function PropertyCard({
           {property.tier === "tier_2" && property.missing_features && (
             <div className="mt-3 border-t border-border pt-3">
               <div className="mb-1 font-mono text-[10px] uppercase tracking-[0.18em] text-warning">
-                Trade-offs
+                {t("results.tradeoffs", lang)}
               </div>
               <div className="text-xs text-muted-foreground">
-                Missing: {property.missing_features.join(", ")}
+                {t("results.missing", lang)}: {property.missing_features.join(", ")}
                 {property.remedy && (
-                  <div className="mt-1">Remedy: {property.remedy}</div>
+                  <div className="mt-1">
+                    {t("results.remedy", lang)}: {property.remedy}
+                  </div>
                 )}
               </div>
             </div>
           )}
         </div>
 
-        {/* Reject */}
         {open ? (
           <div className="space-y-2 rounded-xl border border-border bg-surface/60 p-3">
             <Input
               autoFocus
               value={reason}
               onChange={(e) => setReason(e.target.value)}
-              placeholder="Why isn't this a fit? (helps the agent learn)"
+              placeholder={t("results.reject_placeholder", lang)}
               className="h-9 rounded-lg border-border bg-surface-raised text-sm"
             />
             <div className="flex justify-end gap-2">
@@ -259,7 +262,7 @@ function PropertyCard({
                 }}
                 className="h-8"
               >
-                Cancel
+                {t("results.btn.cancel", lang)}
               </Button>
               <Button
                 size="sm"
@@ -270,7 +273,7 @@ function PropertyCard({
                 }}
                 className="h-8 rounded-lg bg-foreground text-background"
               >
-                Submit
+                {t("results.btn.submit", lang)}
               </Button>
             </div>
           </div>
@@ -280,7 +283,7 @@ function PropertyCard({
             className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-border py-2 font-mono text-[11px] uppercase tracking-[0.16em] text-muted-foreground transition-colors hover:border-destructive/40 hover:text-destructive"
           >
             <X className="h-3.5 w-3.5" />
-            Not interested
+            {t("results.btn.not_interested", lang)}
           </button>
         )}
       </div>

@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { Sparkles } from "lucide-react";
 import { useAppStore } from "@/lib/store";
-import { LANG_LABEL, type Lang } from "@/lib/i18n";
+import { LANG_LABEL, t, type Lang } from "@/lib/i18n";
 
 interface AppShellProps {
   children: ReactNode;
@@ -27,7 +27,7 @@ export function AppShell({ children }: AppShellProps) {
                 LXVII<span className="text-gradient"></span>
               </span>
               <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-                {lang === "en" ? "Property Scouting Agent" : "房产顾问代理"}
+                {t("shell.tagline", lang)}
               </span>
             </div>
           </div>
@@ -36,7 +36,7 @@ export function AppShell({ children }: AppShellProps) {
             {/* Language toggle — visible on all phases, default EN. */}
             <div
               role="group"
-              aria-label="Language"
+              aria-label={t("shell.language", lang)}
               className="inline-flex items-center rounded-full border border-border bg-surface-raised/60 p-0.5 font-mono text-[10px] uppercase tracking-[0.18em] backdrop-blur"
             >
               {(["en", "zh"] as Lang[]).map((code) => (
@@ -64,9 +64,9 @@ export function AppShell({ children }: AppShellProps) {
                   <span className="absolute inset-0 animate-ping rounded-full bg-success/80" />
                   <span className="relative h-1.5 w-1.5 rounded-full bg-success" />
                 </span>
-                {lang === "en" ? "system online" : "系统在线"}
+                {t("shell.online", lang)}
               </span>
-              <span>v1.0 · mvp</span>
+              <span>{t("shell.version", lang)}</span>
             </div>
           </div>
         </div>
@@ -77,9 +77,7 @@ export function AppShell({ children }: AppShellProps) {
       </main>
 
       <footer className="relative z-10 border-t border-border/40 py-6 text-center font-mono text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
-        {lang === "en"
-          ? "Crafted by AIC hackathon 2026 by team LXVII"
-          : "由 LXVII 团队为 AIC 黑客松 2026 打造"}
+        {t("shell.footer", lang)}
       </footer>
     </div>
   );

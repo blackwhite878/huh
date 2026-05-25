@@ -2,8 +2,10 @@ import { RotateCcw, ArrowRight, Brain } from "lucide-react";
 import { useAppStore } from "@/lib/store";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
+import { t } from "@/lib/i18n";
 
 export function ActionRequired() {
+  const lang = useAppStore((s) => s.lang);
   const sessionId = useAppStore((s) => s.sessionId);
   const resetAll = useAppStore((s) => s.resetAll);
   const resetForKeepMemories = useAppStore((s) => s.resetForKeepMemories);
@@ -25,29 +27,29 @@ export function ActionRequired() {
       <div className="mb-8 text-center">
         <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-primary/30 bg-primary/[0.06] px-3 py-1 font-mono text-[10px] uppercase tracking-[0.2em] text-primary">
           <Brain className="h-3 w-3" />
-          preferences updated
+          {t("ar.badge", lang)}
         </div>
         <h2 className="text-3xl font-semibold tracking-tight md:text-4xl">
-          What&apos;s next?
+          {t("ar.title", lang)}
         </h2>
-        <p className="mt-3 text-muted-foreground">
-          Your feedback has been learned. Choose how to continue.
-        </p>
+        <p className="mt-3 text-muted-foreground">{t("ar.subtitle", lang)}</p>
       </div>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         <ActionCard
           icon={RotateCcw}
-          title="Start fresh"
-          subtitle="New prompt"
-          description="Clear everything and rebuild your profile from scratch."
+          title={t("action.start_fresh", lang)}
+          subtitle={t("action.new_prompt", lang)}
+          description={t("action.new_prompt.desc", lang)}
+          continueLabel={t("ar.continue", lang)}
           onClick={() => choose("new_prompt")}
         />
         <ActionCard
           icon={ArrowRight}
-          title="Keep memories"
-          subtitle="Continue with learned preferences"
-          description="Hold on to your dialogue & exclusions, adjust the search."
+          title={t("action.keep_memories", lang)}
+          subtitle={t("action.keep_memories.sub", lang)}
+          description={t("action.keep_memories.desc", lang)}
+          continueLabel={t("ar.continue", lang)}
           onClick={() => choose("keep_memories")}
           highlight
         />
@@ -61,6 +63,7 @@ function ActionCard({
   title,
   subtitle,
   description,
+  continueLabel,
   onClick,
   highlight,
 }: {
@@ -68,6 +71,7 @@ function ActionCard({
   title: string;
   subtitle: string;
   description: string;
+  continueLabel: string;
   onClick: () => void;
   highlight?: boolean;
 }) {
@@ -102,7 +106,7 @@ function ActionCard({
         variant="ghost"
         className="mt-4 h-9 rounded-lg px-0 text-sm font-medium text-foreground hover:bg-transparent"
       >
-        Continue
+        {continueLabel}
         <ArrowRight className="ml-1.5 h-4 w-4 transition-transform group-hover:translate-x-1" />
       </Button>
     </button>

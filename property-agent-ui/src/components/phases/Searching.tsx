@@ -7,47 +7,14 @@ import type {
   SearchStage,
   SearchStatusResponse,
 } from "@/lib/types";
+import { t } from "@/lib/i18n";
 
-// Minimum on-screen dwell per pipeline stage. Even if the backend races
-// through scraping → ranking → generating in <1s, the UI walks the rail
-// at this pace so every step has time to "bling" (pulse + glow ring).
 const MIN_STAGE_MS = 10_000;
 
-// NOTE: Phase 1 emits AgentStyle as "Professional" | "Friendly" |
-// "Enthusiastic" (capitalised). A previous version of this file keyed
-// COPY by "professional" | "friendly" | "active", so COPY[style] was
-// undefined and COPY[style][stage] threw the moment the user landed on
-// the SEARCHING screen (e.g. right after answering cash/loan). Keys
-// here MUST match AgentStyle exactly — guarded below by a fallback.
-const COPY: Record<AgentStyle, Record<SearchStage, string>> = {
-  Professional: {
-    idle: "Preparing the search pipeline…",
-    scraping: "Sourcing the latest property listings…",
-    ranking: "Scoring listings against your preferences…",
-    generating_remarks:
-      "AI is composing tailored analysis for each property…",
-    complete: "Ready.",
-  },
-  Friendly: {
-    idle: "Warming up…",
-    scraping: "Going to grab the freshest listings for you — back in a sec.",
-    ranking: "Picking the ones that fit you best…",
-    generating_remarks: "Almost done — writing up the highlights now.",
-    complete: "All set!",
-  },
-  Enthusiastic: {
-    idle: "Preparing.",
-    scraping: "Pulling listings live.",
-    ranking: "Ranking by fit.",
-    generating_remarks: "Writing remarks.",
-    complete: "Done.",
-  },
-};
-
-const STAGES: { key: SearchStage; label: string; icon: typeof Search }[] = [
-  { key: "scraping", label: "Scraping", icon: Search },
-  { key: "ranking", label: "Ranking", icon: BarChart3 },
-  { key: "generating_remarks", label: "Generating", icon: FileText },
+const STAGES: { key: SearchStage; labelKey: string; icon: typeof Search }[] = [
+  { key: "scraping",           labelKey: "search.stage.scraping",   icon: Search },
+  { key: "ranking",            labelKey: "search.stage.ranking",    icon: BarChart3 },
+  { key: "generating_remarks", labelKey: "search.stage.generating", icon: FileText },
 ];
 
 function stageIndex(stage: SearchStage | null): number {
@@ -58,6 +25,7 @@ function stageIndex(stage: SearchStage | null): number {
 }
 
 export function Searching() {
+  const lang = useAppStore((s) => s.lang);
   const sessionId = useAppStore((s) => s.sessionId);
   const style = useAppStore((s) => s.phase1Form?.agent_style ?? "Professional");
   const searchStage = useAppStore((s) => s.searchStage);
@@ -66,19 +34,11 @@ export function Searching() {
   const setAppState = useAppStore((s) => s.setAppState);
   const resetAll = useAppStore((s) => s.resetAll);
 
-  // UI-only stage cursor. Advances one step per MIN_STAGE_MS until it
-  // catches up to whatever the backend reports — never skips ahead.
   const [uiIdx, setUiIdx] = useState(0);
   const [backendComplete, setBackendComplete] = useState(false);
   const lastAdvanceAt = useRef<number>(Date.now());
-  // Latest payload from backend; we stash it so navigation can wait for
-  // the UI rail to finish blinging through every stage before leaving.
   const completePayload = useRef<SearchStatusResponse | null>(null);
 
-  // Subscribe to backend pipeline status. We update the store's
-  // searchStage (for any other consumers), capture the completion
-  // payload, but DO NOT navigate immediately — the UI rail finishes
-  // its dwell first.
   useEffect(() => {
     if (!sessionId) return;
     const stop = subscribeSearchStatus(sessionId, (data) => {
@@ -96,49 +56,47 @@ export function Searching() {
     return stop;
   }, [sessionId, setSearchStage, resetAll]);
 
-  // Drive the UI cursor forward at MIN_STAGE_MS pacing, capped by the
-  // backend stage. When backendComplete is true we let it walk all the
-  // way to the last stage.
   useEffect(() => {
     const backendIdx = backendComplete
       ? STAGES.length - 1
       : stageIndex(searchStage);
-    if (uiIdx >= backendIdx) return; // already at/ahead of backend
+    if (uiIdx >= backendIdx) return;
 
     const elapsed = Date.now() - lastAdvanceAt.current;
     const wait = Math.max(0, MIN_STAGE_MS - elapsed);
-    const t = setTimeout(() => {
+    const tm = setTimeout(() => {
       setUiIdx((i) => i + 1);
       lastAdvanceAt.current = Date.now();
     }, wait);
-    return () => clearTimeout(t);
+    return () => clearTimeout(tm);
   }, [uiIdx, searchStage, backendComplete]);
 
-  // Only navigate once the UI has visibly completed the last stage's
-  // dwell AND the backend has reported complete.
   useEffect(() => {
     if (!backendComplete) return;
     if (uiIdx < STAGES.length - 1) return;
     const data = completePayload.current;
-    const t = setTimeout(() => {
+    const tm = setTimeout(() => {
       if (data) setResults(data);
       setAppState(
         data?.tier3_triggered ? "TIER3_NO_RESULT" : "BATCH_1_DISPLAY",
       );
     }, MIN_STAGE_MS);
-    return () => clearTimeout(t);
+    return () => clearTimeout(tm);
   }, [backendComplete, uiIdx, setResults, setAppState]);
 
-  // Copy reflects whichever stage the UI is currently showcasing — so
-  // the headline tracks the rail, not the (possibly faster) backend.
   const uiStageKey: SearchStage =
     backendComplete && uiIdx >= STAGES.length - 1
       ? "complete"
       : STAGES[Math.min(uiIdx, STAGES.length - 1)].key;
+
   // Defensive: if a future AgentStyle leaks through that we don't have copy
-  // for, fall back to Professional instead of throwing into the route
-  // errorComponent ("This page didn't load").
-  const currentCopy = (COPY[style] ?? COPY.Professional)[uiStageKey];
+  // for, fall back to Professional. (`t()` would warn on a missing key.)
+  const safeStyle: AgentStyle = (["Professional", "Friendly", "Enthusiastic"] as AgentStyle[]).includes(
+    style as AgentStyle,
+  )
+    ? (style as AgentStyle)
+    : "Professional";
+  const currentCopy = t(`search.copy.${safeStyle}.${uiStageKey}`, lang);
 
   return (
     <div className="mx-auto flex min-h-[65vh] max-w-2xl flex-col items-center justify-center text-center">
@@ -153,7 +111,6 @@ export function Searching() {
         {currentCopy}
       </h2>
 
-      {/* Stage rail — every reached step keeps blinging (ping + glow). */}
       <div className="mt-10 w-full max-w-md">
         <div className="relative">
           <div className="absolute left-5 right-5 top-1/2 h-px -translate-y-1/2 bg-border" />
@@ -169,10 +126,7 @@ export function Searching() {
               const active = i === uiIdx;
               const Icon = s.icon;
               return (
-                <div
-                  key={s.key}
-                  className="flex flex-col items-center gap-2"
-                >
+                <div key={s.key} className="flex flex-col items-center gap-2">
                   <div
                     className={[
                       "relative flex h-10 w-10 items-center justify-center rounded-full border-2 transition-all",
@@ -184,14 +138,8 @@ export function Searching() {
                     ].join(" ")}
                   >
                     <Icon
-                      className={[
-                        "h-4 w-4",
-                        reached ? "animate-pulse" : "",
-                      ].join(" ")}
+                      className={["h-4 w-4", reached ? "animate-pulse" : ""].join(" ")}
                     />
-                    {/* Every reached step gets a continuous ping ring,
-                        not just the active one. Stagger the ping by
-                        index so they don't all flash on the same beat. */}
                     {reached && (
                       <>
                         <span
@@ -211,7 +159,7 @@ export function Searching() {
                       reached ? "text-foreground" : "text-muted-foreground",
                     ].join(" ")}
                   >
-                    {s.label}
+                    {t(s.labelKey, lang)}
                   </span>
                 </div>
               );
@@ -221,7 +169,7 @@ export function Searching() {
       </div>
 
       <p className="mt-12 font-mono text-[10px] uppercase tracking-[0.22em] text-muted-foreground">
-        input locked · search pipeline running
+        {t("search.footer", lang)}
       </p>
     </div>
   );

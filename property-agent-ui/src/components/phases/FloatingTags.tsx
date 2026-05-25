@@ -4,67 +4,42 @@
 // agent's "memory" of what it knows is visible while semantic alignment
 // runs in the background.
 //
-// Collision contract (NON-NEGOTIABLE):
-//   1. Chips MUST NOT enter the centered safe zone (headline / sub-copy
-//      / progress bars).
-//   2. Chips MUST NOT visually collide with each other, even with the
-//      longest label and full drift amplitude.
-//
-// Strategy:
-//   - All chips anchored to the left OR right edge (never the center).
-//   - Per side, chips are distributed across non-overlapping vertical
-//     bands. Each band reserves >= 22% of the host height; chip is ~28px
-//     tall + drift amplitude ~8px, so even at viewport=700px the gap
-//     between consecutive band centers (~150px) >> chip footprint.
-//   - Each chip is clamped to max-width 38% of the host so its right/left
-//     edge cannot reach the center safe zone.
-//   - Motion uses 4 irregular drift variants with prime-ish durations and
-//     unique delays → non-periodic on human timescales.
-//   - On viewports narrower than MIN_WIDTH_PX the safe zone + chip
-//     margins do not fit honestly, so chips are hidden.
-//
-// Phase 1.5 update: chips now reflect *user input* from Phase 1 instead
-// of decorative-only labels. A chip is hidden entirely when the
-// underlying field is empty, so the user never sees a placeholder for
-// a value they did not actually supply.
+// (Collision contract and layout strategy are unchanged from the original
+// file — only the chip *labels* now go through the i18n dict so the chips
+// switch language when the toggle is flipped.)
 
 import { useEffect, useState } from "react";
 import { useAppStore } from "@/lib/store";
 import type { AgentStyle, Gender, Identity } from "@/lib/types";
+import { t, type Lang } from "@/lib/i18n";
 
 type DriftVariant = "a" | "b" | "c" | "d";
 
 interface Anchor {
   key: string;
   label: string;
-  // Exactly one of left/right is set (chips always edge-anchored).
   side: "left" | "right";
-  edgeOffset: string; // e.g. "4%"
-  top: string;        // vertical center expressed as top %
+  edgeOffset: string;
+  top: string;
   delay: string;
   duration: string;
   variant: DriftVariant;
   emphasis?: boolean;
 }
 
-// Below this viewport width the safe zone + chip margins do not fit.
 const MIN_WIDTH_PX = 880;
 
-const IDENTITY_LABEL: Record<Identity, string> = {
-  first_time_buyer: "First-time buyer",
-  investor: "Investor",
-  upgrader: "Upgrader",
-};
-const GENDER_LABEL: Record<Gender, string> = {
-  female: "Female",
-  male: "Male",
-  prefer_not_to_say: "Undisclosed",
-};
-const STYLE_LABEL: Record<AgentStyle, string> = {
-  Professional: "Professional",
-  Friendly: "Friendly",
-  Enthusiastic: "Enthusiastic",
-};
+function identityLabel(v: Identity, lang: Lang): string {
+  return t(`p1.identity.${v}`, lang);
+}
+function genderLabel(v: Gender, lang: Lang): string {
+  // "Prefer not to say" is too long for a chip; use a short variant.
+  if (v === "prefer_not_to_say") return t("p1.gender.undisclosed_short", lang);
+  return t(`p1.gender.${v}`, lang);
+}
+function styleLabel(v: AgentStyle, lang: Lang): string {
+  return t(`p1.style.${v}`, lang);
+}
 
 function fmtBudget(n: number | undefined): string | null {
   if (!n || n <= 0) return null;
@@ -72,12 +47,11 @@ function fmtBudget(n: number | undefined): string | null {
 }
 
 function trimText(v: string | undefined, max = 28): string | null {
-  const t = (v ?? "").trim();
-  if (!t) return null;
-  return t.length > max ? `${t.slice(0, max - 1)}…` : t;
+  const txt = (v ?? "").trim();
+  if (!txt) return null;
+  return txt.length > max ? `${txt.slice(0, max - 1)}…` : txt;
 }
 
-// A non-overlapping band layout with up to 4 slots per side.
 const LEFT_TOPS = ["14%", "44%", "74%"];
 const RIGHT_TOPS = ["12%", "36%", "60%", "84%"];
 
@@ -91,6 +65,7 @@ interface ChipSpec {
 
 export function FloatingTags() {
   const [visible, setVisible] = useState(false);
+  const lang = useAppStore((s) => s.lang);
   const phase1 = useAppStore((s) => s.phase1Form);
 
   useEffect(() => {
@@ -102,20 +77,28 @@ export function FloatingTags() {
 
   if (!visible) return null;
 
-  // Build chip specs from the user's actual Phase 1 input. Anything the
-  // user did not supply is skipped — never shown as "—".
   const specs: ChipSpec[] = [];
 
   const budget = fmtBudget(phase1?.budget);
-  if (budget) specs.push({ key: "budget", label: `BUDGET · ${budget}`, emphasis: true });
+  if (budget)
+    specs.push({
+      key: "budget",
+      label: `${t("ft.label.budget", lang)} · ${budget}`,
+      emphasis: true,
+    });
 
   const target = trimText(phase1?.target);
-  if (target) specs.push({ key: "target", label: `TARGET · ${target.toUpperCase()}`, emphasis: true });
+  if (target)
+    specs.push({
+      key: "target",
+      label: `${t("ft.label.target", lang)} · ${target.toUpperCase()}`,
+      emphasis: true,
+    });
 
   if (phase1?.identity) {
     specs.push({
       key: "identity",
-      label: `IDENTITY · ${IDENTITY_LABEL[phase1.identity].toUpperCase()}`,
+      label: `${t("ft.label.identity", lang)} · ${identityLabel(phase1.identity, lang).toUpperCase()}`,
       emphasis: true,
     });
   }
@@ -123,28 +106,27 @@ export function FloatingTags() {
   if (phase1?.agent_style) {
     specs.push({
       key: "agent_style",
-      label: `STYLE · ${STYLE_LABEL[phase1.agent_style].toUpperCase()}`,
+      label: `${t("ft.label.style", lang)} · ${styleLabel(phase1.agent_style, lang).toUpperCase()}`,
     });
   }
 
   if (phase1?.gender) {
     specs.push({
       key: "gender",
-      label: `GENDER · ${GENDER_LABEL[phase1.gender].toUpperCase()}`,
+      label: `${t("ft.label.gender", lang)} · ${genderLabel(phase1.gender, lang).toUpperCase()}`,
     });
   }
 
   const desc = trimText(phase1?.description, 32);
   if (desc) specs.push({ key: "description", label: `“${desc}”` });
 
-  // Distribute specs across left/right bands. Alternate sides so the
-  // composition stays balanced even when only some chips are present.
   const anchors: Anchor[] = [];
   let leftIdx = 0;
   let rightIdx = 0;
   specs.forEach((spec, i) => {
     const side: "left" | "right" =
-      (i % 2 === 0 && leftIdx < LEFT_TOPS.length) || rightIdx >= RIGHT_TOPS.length
+      (i % 2 === 0 && leftIdx < LEFT_TOPS.length) ||
+      rightIdx >= RIGHT_TOPS.length
         ? "left"
         : "right";
     const top =
@@ -170,9 +152,6 @@ export function FloatingTags() {
       className="pointer-events-none absolute inset-0 overflow-hidden"
     >
       {anchors.map((a) => (
-        // Outer wrapper owns the absolute anchor + vertical centering.
-        // Inner element owns the drift animation, so the two transforms
-        // don't compete (keyframes would otherwise overwrite translateY).
         <div
           key={a.key}
           className="absolute max-w-[38%]"

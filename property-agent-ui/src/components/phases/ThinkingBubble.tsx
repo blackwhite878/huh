@@ -5,26 +5,29 @@
 
 import { useEffect, useState } from "react";
 import { Bot } from "lucide-react";
+import { useAppStore } from "@/lib/store";
+import { t } from "@/lib/i18n";
 
-const PHRASES = [
-  "Reading your requirements",
-  "Cross-referencing dealbreakers",
-  "Matching against your profile",
-  "Checking known facts",
-  "Drafting reply",
-];
+const PHRASE_KEYS = [
+  "thinking.0",
+  "thinking.1",
+  "thinking.2",
+  "thinking.3",
+  "thinking.4",
+] as const;
 
 const TYPE_MS = 40;       // ms per character
 const HOLD_MS = 700;      // ms to hold full phrase
 const FADE_MS = 250;      // ms of fade between phrases
 
 export function ThinkingBubble({ retryCount = 0 }: { retryCount?: number } = {}) {
+  const lang = useAppStore((s) => s.lang);
   const [phraseIdx, setPhraseIdx] = useState(0);
   const [typed, setTyped] = useState("");
   const [fading, setFading] = useState(false);
 
   useEffect(() => {
-    const phrase = PHRASES[phraseIdx];
+    const phrase = t(PHRASE_KEYS[phraseIdx], lang);
     let cancelled = false;
     setTyped("");
     setFading(false);
@@ -45,7 +48,7 @@ export function ThinkingBubble({ retryCount = 0 }: { retryCount?: number } = {})
         setFading(true);
         setTimeout(() => {
           if (cancelled) return;
-          setPhraseIdx((p) => (p + 1) % PHRASES.length);
+          setPhraseIdx((p) => (p + 1) % PHRASE_KEYS.length);
         }, FADE_MS);
       },
       phrase.length * TYPE_MS + HOLD_MS,
@@ -56,7 +59,7 @@ export function ThinkingBubble({ retryCount = 0 }: { retryCount?: number } = {})
       clearInterval(typeTimer);
       clearTimeout(fadeTimer);
     };
-  }, [phraseIdx]);
+  }, [phraseIdx, lang]);
 
   return (
     <div className="flex animate-in fade-in slide-in-from-bottom-1 gap-3">
@@ -66,7 +69,7 @@ export function ThinkingBubble({ retryCount = 0 }: { retryCount?: number } = {})
       <div className="max-w-[78%] rounded-2xl rounded-tl-sm border border-border bg-surface-raised px-4 py-2.5 text-sm leading-relaxed text-muted-foreground">
         {retryCount > 0 && (
           <div className="mb-2 text-xs font-semibold text-orange-500">
-            Retrying ({retryCount}/5)...
+            {t("thinking.retry", lang)} ({retryCount}/5)...
           </div>
         )}
         <span
