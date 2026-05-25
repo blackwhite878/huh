@@ -14,7 +14,7 @@ CSV columns are kept stable for downstream Pydantic schema mapping.
 from __future__ import annotations
 import csv
 import json
-import os
+import logging
 import shutil
 import threading
 from pathlib import Path
@@ -40,7 +40,11 @@ CSV_FIELDS: List[str] = [
     "image_urls",   # ';'-joined
 ]
 
+# List-typed fields are ';'-joined on CSV write to keep schema flat.
+_LIST_FIELDS = {"image_urls"}
+
 _write_lock = threading.Lock()
+logger = logging.getLogger(__name__)
 
 
 def _ensure_dirs() -> None:
@@ -71,12 +75,37 @@ def csv_path(region: str) -> Path:
     return DATA_DIR / f"{region}.csv"
 
 
+def _row_for_csv(r: Dict) -> Dict:
+    """Project a row dict onto CSV_FIELDS, normalising list fields → ';'-joined."""
+    out: Dict = {}
+    for k in CSV_FIELDS:
+        v = r.get(k)
+        if k in _LIST_FIELDS and isinstance(v, list):
+            v = ";".join(str(x) for x in v)
+        out[k] = v if v is not None else ""
+    # Surface unknown keys for debugging without failing the write.
+    unknown = [k for k in r.keys() if k not in CSV_FIELDS]
+    if unknown:
+        logger.debug("append_longterm: dropping unknown fields %s", unknown)
+    return out
+
+
+def _row_from_csv(r: Dict) -> Dict:
+    """Inverse of _row_for_csv: split ';'-joined list fields back into lists."""
+    out = dict(r)
+    for k in _LIST_FIELDS:
+        v = out.get(k)
+        if isinstance(v, str):
+            out[k] = [x for x in v.split(";") if x] if v else []
+    return out
+
+
 def load_longterm(region: str) -> List[Dict]:
     p = csv_path(region)
     if not p.exists():
         return []
     with p.open("r", encoding="utf-8", newline="") as f:
-        return list(csv.DictReader(f))
+        return [_row_from_csv(r) for r in csv.DictReader(f)]
 
 
 def longterm_count(region: str) -> int:
@@ -87,19 +116,23 @@ def append_longterm(region: str, rows: Iterable[Dict]) -> int:
     """Append rows, deduped by listing_url. Returns rows actually written."""
     p = csv_path(region)
     existing_urls = {r["listing_url"] for r in load_longterm(region)}
-    new_rows = [r for r in rows if r.get("listing_url") and r["listing_url"] not in existing_urls]
+    new_rows: List[Dict] = []
+    seen_in_batch: set = set()
+    for r in rows:
+        url = r.get("listing_url")
+        if not url or url in existing_urls or url in seen_in_batch:
+            continue
+        seen_in_batch.add(url)
+        new_rows.append(r)
     if not new_rows:
         return 0
-    file_exists = p.exists()
+    file_exists = p.exists() and p.stat().st_size > 0
     with _write_lock, p.open("a", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(f, fieldnames=CSV_FIELDS, extrasaction="ignore")
         if not file_exists:
             w.writeheader()
         for r in new_rows:
-            # normalise list → ';'-joined
-            if isinstance(r.get("image_urls"), list):
-                r = {**r, "image_urls": ";".join(r["image_urls"])}
-            w.writerow(r)
+            w.writerow(_row_for_csv(r))
     return len(new_rows)
 
 
@@ -112,8 +145,32 @@ def tempo_path(region: str, session_id: str) -> Path:
 def write_tempo(region: str, session_id: str, rows: List[Dict]) -> Path:
     p = tempo_path(region, session_id)
     with _write_lock, p.open("w", encoding="utf-8") as f:
-        json.dump({"region": region, "session_id": session_id, "rows": rows}, f, ensure_ascii=False, indent=2)
+        json.dump({"region": region, "session_id": session_id, "rows": rows},
+                  f, ensure_ascii=False, indent=2)
     return p
+
+
+def append_tempo(region: str, session_id: str, rows: List[Dict]) -> int:
+    """
+    Append rows to a session tempo file, deduped by listing_url. Returns the
+    number of new rows written. Creates the file on first call. This lets
+    partial scrapes survive subsequent failures within the same session.
+    """
+    existing = read_tempo(region, session_id)
+    existing_urls = {r.get("listing_url") for r in existing if r.get("listing_url")}
+    merged = list(existing)
+    added = 0
+    seen_in_batch: set = set()
+    for r in rows:
+        url = r.get("listing_url")
+        if not url or url in existing_urls or url in seen_in_batch:
+            continue
+        seen_in_batch.add(url)
+        merged.append(r)
+        added += 1
+    if added:
+        write_tempo(region, session_id, merged)
+    return added
 
 
 def read_tempo(region: str, session_id: str) -> List[Dict]:

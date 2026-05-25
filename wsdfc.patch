@@ -1,0 +1,593 @@
+diff --git a/backend/scraper/mudah_scraper.py b/backend/scraper/mudah_scraper.py
+index b63440f..b5e5f76 100644
+--- a/backend/scraper/mudah_scraper.py
++++ b/backend/scraper/mudah_scraper.py
+@@ -21,8 +21,8 @@ import re
+ import time
+ import uuid
+ from datetime import datetime, timezone
+-from typing import Awaitable, Callable, Dict, List, Optional
+-from urllib.parse import quote_plus
++from typing import Any, Awaitable, Callable, Dict, List, Optional
++from urllib.parse import quote_plus, urlencode
+ 
+ import httpx
+ from bs4 import BeautifulSoup
+@@ -46,6 +46,23 @@ USER_AGENTS = [
+ ]
+ 
+ LISTING_HREF_RE = re.compile(r"-\d{6,}\.htm$|/property/[\w\-]+/?$|/property/properties-in-")
++# POTENTIAL-BUG (unfixed, listed in audit): Mudah is migrating to Next.js;
++# listing href shape has changed historically. If routing changes again, this
++# regex silently returns []. Consider adding a secondary pattern + a low-water
++# alarm in scrape_region_type that emits a structured warning when zero links
++# are extracted from a non-empty 200-OK HTML.
++
++# Mudah search-query parameter names for advanced filters.
++# NOTE: Mudah's public param names are not officially documented and have
++# changed across redesigns. We send the most commonly observed names AND
++# enforce the same constraints client-side in _row_matches_filters() so the
++# end result is correct even if Mudah ignores the URL params.
++FILTER_PARAM_MAP: Dict[str, str] = {
++    "price_min": "s_pr",        # observed legacy: s_pr / e_pr (start/end price)
++    "price_max": "e_pr",
++    "bedrooms_min": "s_bedroom",
++    "bedrooms_max": "e_bedroom",
++}
+ 
+ 
+ def _headers() -> Dict[str, str]:
+@@ -93,6 +110,13 @@ def _playwright_get_sync(url: str) -> str:
+       subprocess_exec, so async_playwright().start() raises NotImplementedError
+       from Connection.run(). sync_playwright spins up its own thread with a
+       private ProactorEventLoop, so it is immune to whatever loop uvicorn picked.
++
++    POTENTIAL-BUG (unfixed, listed in audit): every call launches a fresh
++    chromium process. Under realtime mode + many concurrent (region,type)
++    pairs this fans out into N chromium instances and exhausts memory on
++    small Linux hosts. Persistent context pool deferred — wire a module-level
++    BrowserContext managed by an asyncio.Lock, evicted on idle, before
++    enabling realtime under load.
+     """
+     try:
+         from playwright.sync_api import sync_playwright
+@@ -118,12 +142,116 @@ async def _playwright_get(url: str) -> str:
+     return await asyncio.to_thread(_playwright_get_sync, url)
+ 
+ 
++# ── filter helpers ───────────────────────────────────────────────────
++def _normalize_filters(filters: Optional[Dict[str, Any]]) -> Dict[str, Any]:
++    """Coerce a free-form brief-derived filter dict into typed numeric bounds.
++
++    Accepted keys (all optional): price_min, price_max, bedrooms_min,
++    bedrooms_max, bedrooms (exact → expands to min+max), extra_keywords
++    (List[str] | str, appended to Mudah q=).
++    Unknown keys are ignored. Invalid numerics are dropped silently rather
++    than raising — the caller's brief shape is not fully validated.
++    """
++    if not filters:
++        return {}
++    out: Dict[str, Any] = {}
++    for k in ("price_min", "price_max"):
++        v = filters.get(k)
++        try:
++            if v is not None:
++                fv = float(v)
++                if fv > 0:
++                    out[k] = fv
++        except (TypeError, ValueError):
++            pass
++    # `bedrooms` shorthand → exact match → s/e bedroom both = N
++    if filters.get("bedrooms") is not None and "bedrooms_min" not in filters and "bedrooms_max" not in filters:
++        try:
++            b = int(filters["bedrooms"])
++            if b > 0:
++                out["bedrooms_min"] = b
++                out["bedrooms_max"] = b
++        except (TypeError, ValueError):
++            pass
++    for k in ("bedrooms_min", "bedrooms_max"):
++        v = filters.get(k)
++        try:
++            if v is not None:
++                iv = int(v)
++                if iv > 0:
++                    out[k] = iv
++        except (TypeError, ValueError):
++            pass
++    kw = filters.get("extra_keywords")
++    if isinstance(kw, str):
++        kw = [kw]
++    if isinstance(kw, (list, tuple)):
++        cleaned = [str(x).strip() for x in kw if str(x).strip()]
++        if cleaned:
++            out["extra_keywords"] = cleaned
++    return out
++
++
++def _row_matches_filters(row: Dict, filters: Dict[str, Any]) -> bool:
++    """Client-side enforcement of price/bedroom bounds.
++
++    Belt-and-braces against Mudah ignoring the URL filter params. Rows with
++    missing values are kept (None ≠ violation) to avoid silently dropping
++    everything when the detail parser can't extract a field.
++    """
++    if not filters:
++        return True
++    price = row.get("price")
++    if price is not None:
++        try:
++            p = float(price)
++            if "price_min" in filters and p < filters["price_min"]:
++                return False
++            if "price_max" in filters and p > filters["price_max"]:
++                return False
++        except (TypeError, ValueError):
++            pass
++    beds = row.get("bedrooms")
++    if beds is not None:
++        try:
++            b = int(beds)
++            if "bedrooms_min" in filters and b < filters["bedrooms_min"]:
++                return False
++            if "bedrooms_max" in filters and b > filters["bedrooms_max"]:
++                return False
++        except (TypeError, ValueError):
++            pass
++    return True
++
++
++
+ # ── parsing ──────────────────────────────────────────────────────────
+-def _build_search_url(region: str, type_key: str, page: int) -> str:
++def _build_search_url(
++    region: str,
++    type_key: str,
++    page: int,
++    filters: Optional[Dict[str, Any]] = None,
++) -> str:
++    """Build a Mudah search URL with optional price/bedroom advanced filters.
++
++    `filters` is the output of `_normalize_filters`. Unknown / missing keys
++    are simply omitted. Caller must ALSO post-filter with
++    `_row_matches_filters` — see FILTER_PARAM_MAP note for why.
++    """
+     region_display = display_region(region).lower().replace(" ", "-")
+-    kw = quote_plus(TYPE_SEARCH_KEYWORD[type_key])
++    kw_terms: List[str] = [TYPE_SEARCH_KEYWORD[type_key]]
++    if filters and filters.get("extra_keywords"):
++        kw_terms.extend(filters["extra_keywords"])
++    kw = quote_plus(" ".join(kw_terms))
++    extra: Dict[str, str] = {}
++    if filters:
++        for fkey, param in FILTER_PARAM_MAP.items():
++            if fkey in filters:
++                extra[param] = str(filters[fkey])
++    extra_qs = ("&" + urlencode(extra)) if extra else ""
+     # Mudah supports state in path and free-text in q=
+-    return f"{HOST}{LIST_PATH}?q={kw}&location={region_display}&o={page}"
++    return f"{HOST}{LIST_PATH}?q={kw}&location={region_display}&o={page}{extra_qs}"
++
+ 
+ 
+ def _extract_listing_urls(html: str) -> List[str]:
+@@ -253,8 +381,17 @@ async def scrape_region_type(
+     target_count: int,
+     *,
+     on_progress: Optional[Callable[[str], Awaitable[None]]] = None,
++    filters: Optional[Dict[str, Any]] = None,
+ ) -> List[Dict]:
+-    """Scrape Mudah.my for one (region,type) up to target_count listings."""
++    """Scrape Mudah.my for one (region,type) up to target_count listings.
++
++    `filters` (optional): advanced search bounds derived from the buyer brief
++    (phase1 + phase2 + semantic_tags + NPP/PPP). Currently supports:
++      price_min, price_max, bedrooms, bedrooms_min, bedrooms_max,
++      extra_keywords (List[str]).
++    Filters are applied BOTH server-side via URL params AND client-side via
++    `_row_matches_filters` (see FILTER_PARAM_MAP for why).
++    """
+     start = time.monotonic()
+     deadline = start + GLOBAL_DEADLINE_SEC
+ 
+@@ -264,6 +401,7 @@ async def scrape_region_type(
+     use_playwright = False
+     collected: List[Dict] = []
+     seen_urls: set[str] = set()
++    norm_filters = _normalize_filters(filters)
+ 
+     async with httpx.AsyncClient(http2=False) as client:
+         # 1. listing pages
+@@ -271,7 +409,7 @@ async def scrape_region_type(
+         for page in range(1, MAX_PAGES_PER_QUERY + 1):
+             if time.monotonic() > deadline:
+                 break
+-            url = _build_search_url(region, type_key, page)
++            url = _build_search_url(region, type_key, page, norm_filters)
+             try:
+                 async with host_sem:
+                     html = await _get(client, url)
+@@ -323,14 +461,23 @@ async def scrape_region_type(
+         # "Task exception was never retrieved" warnings you saw — every
+         # background coro that later raises (Playwright/httpx) has nowhere
+         # to deliver its exception. Explicit cancel + gather fixes both.
++        #
++        # POTENTIAL-BUG (unfixed): when filters drop a high fraction of rows
++        # we may finish detail fetches with fewer than target_count survivors
++        # even though more listing_urls remain unscraped. Acceptable for v1
++        # (caller handles top-up via expansion_level), but worth widening the
++        # cap from `target_count + 20` proportional to filter selectivity.
+         tasks: List[asyncio.Task] = [
+             asyncio.create_task(fetch_one(u)) for u in listing_urls[: target_count + 20]
+         ]
+         try:
+             for coro in asyncio.as_completed(tasks):
+                 row = await coro
+-                if row and row.get("listing_url"):
+-                    collected.append(row)
++                if not row or not row.get("listing_url"):
++                    continue
++                if not _row_matches_filters(row, norm_filters):
++                    continue
++                collected.append(row)
+                 if len(collected) >= target_count:
+                     break
+         finally:
+@@ -343,3 +490,18 @@ async def scrape_region_type(
+                 await asyncio.gather(*pending, return_exceptions=True)
+ 
+     return collected
++
++
++# ── audit notes (unfixed limitations from author's modification list) ──
++# 1. Cloudflare anti-bot: real behaviour not verified — sandbox IP is blocked.
++#    URL shape is inherited from the Hackathon-67 reference. If Mudah changes
++#    routing again, re-validate LIST_PATH + LISTING_HREF_RE against fresh HTML.
++# 2. __NEXT_DATA__ structure: NOT yet implemented here. _parse_detail currently
++#    relies on DOM + meta tags only. When the author lands the deep-walk +
++#    duck-typing pass (adId / subject / price extraction from the embedded
++#    Next.js JSON island), insert it BEFORE the existing DOM logic and keep
++#    DOM as fallback. Any prop rename on Mudah's side returns None, not crash.
++# 3. Playwright pool: see _playwright_get_sync POTENTIAL-BUG note.
++# 4. run_with_retry_then_demo "all-zero == failure" semantics: now enforced in
++#    seeder.run_with_retry_then_demo (this patch).
++
+diff --git a/backend/scraper/pipeline.py b/backend/scraper/pipeline.py
+index 5f41194..1d27ed1 100644
+--- a/backend/scraper/pipeline.py
++++ b/backend/scraper/pipeline.py
+@@ -8,8 +8,9 @@ High-level pipeline glue. Called from backend/search_pipeline.py.
+ """
+ from __future__ import annotations
+ import logging
++import re
+ from pathlib import Path
+-from typing import Dict, List, Optional
++from typing import Any, Dict, List, Optional
+ 
+ import yaml
+ 
+@@ -91,14 +92,108 @@ def resolve_regions(target_text: Optional[str]) -> List[str]:
+     return out or MY_REGIONS[:1]
+ 
+ 
+-async def run_pipeline(session_id: str, brief: Dict) -> Dict:
++# ── brief → advanced filter derivation ───────────────────────────────
++# Bedrooms regex matches "3房", "3 房间", "3 bedroom(s)", "3br", "3-bedroom".
++_BEDROOMS_FROM_TEXT_RE = re.compile(
++    r"(\d+)\s*(?:房|室|间|間|bed(?:room)?s?|br)\b",
++    re.IGNORECASE,
++)
++
++
++def build_filters_from_brief(
++    brief: Dict[str, Any],
++    *,
++    budget_range: Optional[Dict[str, float]] = None,
++) -> Dict[str, Any]:
++    """Derive scraper advanced filters from the full search brief.
++
++    The brief is the merged view of phase1 + phase2 + semantic_tags + NPP +
++    PPP that the dialogue layer accumulates. Currently extracted:
++      - price_min / price_max: prefer explicit budget_range (from
++        SearchSession.current_budget_range), else fall back to a ±15% band
++        around brief.budget.
++      - bedrooms: parsed from free-text target/description if not in brief.
++      - extra_keywords: positive_tags appended to Mudah q= for soft boost.
++
++    POTENTIAL-BUG (noted, not crashing): NPP (negative preferences) are not
++    yet mappable to Mudah URL params — Mudah has no "exclude X" search
++    grammar. They MUST be enforced downstream (ranking_agent / tier
++    classification), NOT here. If you add negative keyword support, do it
++    via post-filter, not via prepending "-keyword" to q= (Mudah treats the
++    minus as literal).
++    """
++    out: Dict[str, Any] = {}
++
++    # --- price band ---
++    bmin = bmax = None
++    if budget_range:
++        try:
++            bmin = float(budget_range.get("min") or 0) or None
++            bmax = float(budget_range.get("max") or 0) or None
++        except (TypeError, ValueError):
++            bmin = bmax = None
++    if bmin is None and bmax is None:
++        try:
++            b = float(brief.get("budget") or 0)
++            if b > 0:
++                bmin = b * 0.85
++                bmax = b * 1.15
++        except (TypeError, ValueError):
++            pass
++    if bmin and bmin > 0:
++        out["price_min"] = bmin
++    if bmax and bmax > 0:
++        out["price_max"] = bmax
++
++    # --- bedrooms ---
++    explicit = brief.get("bedrooms")
++    if explicit is not None:
++        try:
++            n = int(explicit)
++            if n > 0:
++                out["bedrooms"] = n
++        except (TypeError, ValueError):
++            pass
++    else:
++        haystack = " ".join(
++            str(brief.get(k) or "")
++            for k in ("target", "description")
++        )
++        m = _BEDROOMS_FROM_TEXT_RE.search(haystack)
++        if m:
++            try:
++                n = int(m.group(1))
++                if 0 < n < 20:
++                    out["bedrooms"] = n
++            except ValueError:
++                pass
++
++    # --- positive_tags as q= boost terms ---
++    positive_tags = brief.get("positive_tags")
++    if isinstance(positive_tags, (list, tuple)):
++        # Keep it short — Mudah's q= is bounded; first 3 high-signal tokens.
++        kws = [str(t).strip() for t in positive_tags if str(t).strip()][:3]
++        if kws:
++            out["extra_keywords"] = kws
++
++    return out
++
++
++async def run_pipeline(
++    session_id: str,
++    brief: Dict,
++    *,
++    budget_range: Optional[Dict[str, float]] = None,
++) -> Dict:
+     """
+     End-to-end:
+       1. resolve regions from brief.target
+-      2. fill tempo (demo or realtime with 3-retry then demo fallback)
+-      3. rank top10
++      2. derive advanced filters from brief (price_min/max, bedrooms, ...)
++      3. fill tempo (demo or realtime with 3-retry then demo fallback)
++      4. rank top10
+     """
+     regions = resolve_regions(brief.get("target"))
++    filters = build_filters_from_brief(brief, budget_range=budget_range)
+     mode = _load_mode()
+ 
+     # ensure session tempo is fresh
+@@ -107,7 +202,9 @@ async def run_pipeline(session_id: str, brief: Dict) -> Dict:
+ 
+     if mode == "realtime":
+         async def realtime():
+-            return await seeder.fetch_realtime_into_tempo(session_id, regions)
++            return await seeder.fetch_realtime_into_tempo(
++                session_id, regions, filters=filters,
++            )
+         def demo():
+             return seeder.load_demo_into_tempo(session_id, regions)
+         counts = await seeder.run_with_retry_then_demo(realtime, demo, retries=3)
+@@ -120,6 +217,7 @@ async def run_pipeline(session_id: str, brief: Dict) -> Dict:
+         "forced_demo": seeder.FLAGS.forced_demo,
+         "last_error": seeder.FLAGS.last_error,
+         "regions": regions,
++        "filters": filters,
+         "tempo_counts": counts,
+         "ranked": ranked,
+     }
+diff --git a/backend/scraper/ranking_agent.py b/backend/scraper/ranking_agent.py
+index 0b98d27..9b4354b 100644
+--- a/backend/scraper/ranking_agent.py
++++ b/backend/scraper/ranking_agent.py
+@@ -56,7 +56,14 @@ def _clip(x: float, lo: float = 0.5, hi: float = 1.5) -> float:
+ 
+ # ── deterministic math scoring ───────────────────────────────────────
+ def _score_one(row: Dict, brief: Dict) -> Dict[str, float]:
+-    """Per-property dimension scores ∈ [0,1]."""
++    """Per-property dimension scores ∈ [0,1].
++
++    POTENTIAL-BUG (noted): when brief.budget is 0/missing, price_fit silently
++    becomes 0.0 for every row, so the price dimension is excluded from
++    ranking without surfacing a warning. Caller should validate budget>0
++    before invoking rank_top10, OR _score_one should return None for
++    price_fit and the weighted sum should re-normalize remaining dims.
++    """
+     # price fit: Gaussian around target budget
+     budget = float(brief.get("budget") or 0)
+     price = row.get("price")
+diff --git a/backend/scraper/seeder.py b/backend/scraper/seeder.py
+index bab45be..64bc226 100644
+--- a/backend/scraper/seeder.py
++++ b/backend/scraper/seeder.py
+@@ -19,7 +19,7 @@ Functions:
+ from __future__ import annotations
+ import asyncio
+ import logging
+-from typing import Awaitable, Callable, Dict, List, Optional
++from typing import Any, Awaitable, Callable, Dict, List, Optional
+ 
+ from . import storage
+ from .types_quota import (
+@@ -66,10 +66,15 @@ async def ensure_region(region: str) -> Dict:
+         logger.info("[seed] %s/%s scraped=%d written=%d", region, type_key, len(rows), written)
+ 
+     # Pass 2: cross-type back-fill if total still under MAX_PER_REGION.
++    # POTENTIAL-BUG (noted): the loop iterates ALL types in TYPE_QUOTA order
++    # including the ones we just filled. The first iteration re-scrapes the
++    # largest type and storage.append_longterm dedupes it down to 0 written,
++    # wasting one Mudah round-trip per region. Acceptable for v1 (rare path:
++    # only triggers when pass-1 fell short of quota) but worth skipping types
++    # that already hit their quota.
+     total_now = sum(by_type_now.values())
+     if total_now < MAX_PER_REGION:
+         remaining = MAX_PER_REGION - total_now
+-        # try each type with whatever spare; even types already at quota.
+         for type_key in sorted(TYPE_QUOTA, key=lambda k: -TYPE_QUOTA[k]):
+             if remaining <= 0:
+                 break
+@@ -109,19 +114,36 @@ def load_demo_into_tempo(session_id: str, regions: List[str]) -> Dict[str, int]:
+     return counts
+ 
+ 
+-async def fetch_realtime_into_tempo(session_id: str, regions: List[str]) -> Dict[str, int]:
++async def fetch_realtime_into_tempo(
++    session_id: str,
++    regions: List[str],
++    *,
++    filters: Optional[Dict[str, Any]] = None,
++) -> Dict[str, int]:
+     counts: Dict[str, int] = {}
+     for region in regions:
+-        # If long-term already complete, skip live and reuse — but still write tempo.
+-        if storage.longterm_count(region) >= MAX_PER_REGION:
++        # If long-term already complete AND no advanced filter is in play,
++        # skip live and reuse — but still write tempo.
++        # POTENTIAL-BUG (noted): if filters is set we always re-scrape because
++        # the cached longterm CSV ignores filter bounds; this is correct but
++        # wastes bandwidth when the same filter is repeated across sessions.
++        # Acceptable for v1; consider a filter-aware cache key later.
++        if not filters and storage.longterm_count(region) >= MAX_PER_REGION:
+             rows = storage.load_longterm(region)
+         else:
+             rows_acc: List[Dict] = []
+             for type_key, quota in TYPE_QUOTA.items():
+-                got = await scrape_region_type(region, type_key, quota)
++                got = await scrape_region_type(region, type_key, quota, filters=filters)
+                 rows_acc.extend(got)
+-            storage.append_longterm(region, rows_acc)
+-            rows = storage.load_longterm(region)
++            # Only persist into longterm when scraping the broad (unfiltered)
++            # universe — filtered scrapes would pollute the per-region cache
++            # with a biased subset that future unfiltered queries would
++            # mistake for "complete".
++            if not filters:
++                storage.append_longterm(region, rows_acc)
++                rows = storage.load_longterm(region)
++            else:
++                rows = rows_acc
+         storage.write_tempo(region, session_id, rows)
+         counts[region] = len(rows)
+     return counts
+@@ -135,18 +157,39 @@ async def run_with_retry_then_demo(
+     retries: int = 3,
+ ) -> Dict[str, int]:
+     """
+-    Tries realtime up to `retries` times. On three consecutive failures, falls
+-    back to demo and sets FLAGS.forced_demo = True so the frontend can show a
+-    popup via /api/v1/system_status.
++    Tries realtime up to `retries` times. On three consecutive failures, or
++    when realtime returns an all-zero count map (treated as a soft failure
++    rather than a "success with no data"), falls back to demo and sets
++    FLAGS.forced_demo = True so the frontend can show a popup via
++    /api/v1/system_status.
++
++    Why all-zero == failure (semantic change vs. original):
++      Previously a successful realtime call returning {region: 0 for region
++      in regions} would be handed straight to the ranking agent, producing
++      an empty top10 with no degradation signal. Mudah anti-bot, regex
++      drift, or filter over-selectivity all manifest as "zero rows, no
++      exception" — indistinguishable from a real empty-result query at the
++      ranking layer. Promoting it to "trigger demo fallback + forced_demo
++      flag" lets the frontend show the degraded-mode banner. The only false
++      positive is a legitimately empty (region,filter) query, which under
++      this app's quota model (100 rows/region target) is vanishingly rare.
+     """
+     last_err: Optional[str] = None
+     for attempt in range(1, retries + 1):
+         try:
+-            return await realtime_coro()
++            result = await realtime_coro()
+         except Exception as e:
+             last_err = f"attempt {attempt}: {e!r}"
+             logger.warning("[scraper] realtime failed %s", last_err)
+             await asyncio.sleep(1.0 * attempt)
++            continue
++        # New: zero-as-failure detection.
++        if isinstance(result, dict) and result and sum(int(v or 0) for v in result.values()) == 0:
++            last_err = f"attempt {attempt}: realtime returned all-zero counts ({result!r})"
++            logger.warning("[scraper] realtime produced no rows %s", last_err)
++            await asyncio.sleep(1.0 * attempt)
++            continue
++        return result
+     FLAGS.forced_demo = True
+     FLAGS.last_error = last_err
+     logger.error("[scraper] forced DEMO after %d retries: %s", retries, last_err)
+diff --git a/backend/scraper/storage.py b/backend/scraper/storage.py
+index cf90e4d..8447e10 100644
+--- a/backend/scraper/storage.py
++++ b/backend/scraper/storage.py
+@@ -84,23 +84,35 @@ def longterm_count(region: str) -> int:
+ 
+ 
+ def append_longterm(region: str, rows: Iterable[Dict]) -> int:
+-    """Append rows, deduped by listing_url. Returns rows actually written."""
++    """Append rows, deduped by listing_url. Returns rows actually written.
++
++    BUG-FIX: previously the existing-url snapshot was read OUTSIDE
++    `_write_lock`. Two concurrent append_longterm() calls for the same
++    region (e.g. two sessions both topping up the seed CSV) could each see
++    the pre-write state and both append the same listing — duplicating rows
++    despite the dedupe contract. The read is now inside the lock.
++    """
+     p = csv_path(region)
+-    existing_urls = {r["listing_url"] for r in load_longterm(region)}
+-    new_rows = [r for r in rows if r.get("listing_url") and r["listing_url"] not in existing_urls]
+-    if not new_rows:
+-        return 0
+-    file_exists = p.exists()
+-    with _write_lock, p.open("a", encoding="utf-8", newline="") as f:
+-        w = csv.DictWriter(f, fieldnames=CSV_FIELDS, extrasaction="ignore")
+-        if not file_exists:
+-            w.writeheader()
+-        for r in new_rows:
+-            # normalise list → ';'-joined
+-            if isinstance(r.get("image_urls"), list):
+-                r = {**r, "image_urls": ";".join(r["image_urls"])}
+-            w.writerow(r)
+-    return len(new_rows)
++    materialised = list(rows)  # iterables can be one-shot
++    with _write_lock:
++        existing_urls = {r["listing_url"] for r in load_longterm(region)}
++        new_rows = [
++            r for r in materialised
++            if r.get("listing_url") and r["listing_url"] not in existing_urls
++        ]
++        if not new_rows:
++            return 0
++        file_exists = p.exists()
++        with p.open("a", encoding="utf-8", newline="") as f:
++            w = csv.DictWriter(f, fieldnames=CSV_FIELDS, extrasaction="ignore")
++            if not file_exists:
++                w.writeheader()
++            for r in new_rows:
++                # normalise list → ';'-joined
++                if isinstance(r.get("image_urls"), list):
++                    r = {**r, "image_urls": ";".join(r["image_urls"])}
++                w.writerow(r)
++        return len(new_rows)
+ 
+ 
+ # ─── tempo JSON (session-scoped working set) ───────────────────────

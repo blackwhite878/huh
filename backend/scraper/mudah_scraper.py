@@ -16,10 +16,10 @@ Returns rows matching storage.CSV_FIELDS.
 """
 from __future__ import annotations
 import asyncio
+import json as _json
 import random
 import re
 import time
-import uuid
 from datetime import datetime, timezone
 from typing import Awaitable, Callable, Dict, List, Optional
 from urllib.parse import quote_plus
@@ -27,11 +27,15 @@ from urllib.parse import quote_plus
 import httpx
 from bs4 import BeautifulSoup
 
-from .types_quota import TYPE_SEARCH_KEYWORD, display_region
+from .types_quota import TYPE_SEARCH_KEYWORD, display_region  # noqa: F401
 
 # ── tuning ───────────────────────────────────────────────────────────
 HOST = "https://www.mudah.my"
-LIST_PATH = "/malaysia/properties-for-sale"
+# NOTE: Mudah uses path-based region routing, e.g.
+#   https://www.mudah.my/selangor/properties-for-sale?q=condo&o=2
+# The previous form `/malaysia/properties-for-sale?location=<region>` returns
+# 404 / empty pages and was the root cause of "scraper saves no data".
+LIST_PATH_TEMPLATE = "/{region}/properties-for-sale"
 MAX_PAGES_PER_QUERY = 8
 PER_HOST_CONCURRENCY = 4
 DETAIL_CONCURRENCY = 6
@@ -45,7 +49,10 @@ USER_AGENTS = [
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36",
 ]
 
-LISTING_HREF_RE = re.compile(r"-\d{6,}\.htm$|/property/[\w\-]+/?$|/property/properties-in-")
+# Mudah detail URLs end in `-<digits>.htm`. The previous regex also matched
+# `/property/properties-in-...` listing-index pages which are NOT details and
+# produced garbage parses. Tightened to detail pages only.
+LISTING_HREF_RE = re.compile(r"-\d{6,}\.htm(?:[?#]|$)")
 
 
 def _headers() -> Dict[str, str]:
@@ -83,17 +90,6 @@ async def _get(client: httpx.AsyncClient, url: str) -> str:
 
 
 def _playwright_get_sync(url: str) -> str:
-    """
-    Synchronous Playwright fetch — must run in a worker thread (see _playwright_get).
-
-    Why sync (not async_playwright):
-      Under uvicorn on Windows the running event loop is sometimes a
-      SelectorEventLoop (uvicorn --reload worker, or an upstream lib that
-      overrides the policy). SelectorEventLoop does NOT implement
-      subprocess_exec, so async_playwright().start() raises NotImplementedError
-      from Connection.run(). sync_playwright spins up its own thread with a
-      private ProactorEventLoop, so it is immune to whatever loop uvicorn picked.
-    """
     try:
         from playwright.sync_api import sync_playwright
     except Exception as e:  # pragma: no cover
@@ -111,19 +107,14 @@ def _playwright_get_sync(url: str) -> str:
 
 
 async def _playwright_get(url: str) -> str:
-    """Run the blocking sync_playwright call off the event loop."""
-    # Windows: ensure the worker thread sees ProactorEventLoopPolicy if it
-    # ever needs to create its own loop. sync_playwright manages its own
-    # thread+loop internally so this is belt-and-braces.
     return await asyncio.to_thread(_playwright_get_sync, url)
 
 
 # ── parsing ──────────────────────────────────────────────────────────
 def _build_search_url(region: str, type_key: str, page: int) -> str:
-    region_display = display_region(region).lower().replace(" ", "-")
+    # region is the canonical slug ("selangor", "kuala-lumpur", "negeri-sembilan").
     kw = quote_plus(TYPE_SEARCH_KEYWORD[type_key])
-    # Mudah supports state in path and free-text in q=
-    return f"{HOST}{LIST_PATH}?q={kw}&location={region_display}&o={page}"
+    return f"{HOST}{LIST_PATH_TEMPLATE.format(region=region)}?q={kw}&o={page}"
 
 
 def _extract_listing_urls(html: str) -> List[str]:
@@ -166,13 +157,128 @@ def _clean_price(text: str) -> Optional[float]:
         return None
 
 
+def _extract_next_data(soup: BeautifulSoup) -> Optional[Dict]:
+    """
+    Mudah is a Next.js app. The reliable ground-truth payload lives in
+    <script id="__NEXT_DATA__" type="application/json">{...}</script>.
+    Falls back silently if absent (older A/B variants or anti-bot stub).
+    """
+    tag = soup.find("script", id="__NEXT_DATA__")
+    if not tag or not tag.string:
+        return None
+    try:
+        return _json.loads(tag.string)
+    except Exception:
+        return None
+
+
+def _walk_find(node, predicate):
+    """Depth-first search a nested JSON tree for the first node matching predicate."""
+    if predicate(node):
+        return node
+    if isinstance(node, dict):
+        for v in node.values():
+            found = _walk_find(v, predicate)
+            if found is not None:
+                return found
+    elif isinstance(node, list):
+        for v in node:
+            found = _walk_find(v, predicate)
+            if found is not None:
+                return found
+    return None
+
+
+def _parse_from_next_data(nd: Dict) -> Dict:
+    """Best-effort extraction from Mudah's __NEXT_DATA__. Returns partial dict."""
+    out: Dict = {}
+    ad = _walk_find(
+        nd,
+        lambda n: isinstance(n, dict) and ("adId" in n or "subject" in n) and "price" in n,
+    )
+    if not isinstance(ad, dict):
+        return out
+
+    if isinstance(ad.get("subject"), str):
+        out["title"] = ad["subject"]
+
+    price_val = ad.get("price")
+    if isinstance(price_val, (int, float)):
+        out["price"] = float(price_val)
+    elif isinstance(price_val, str):
+        out["price"] = _clean_price(price_val)
+
+    for k_src, k_dst in (("region", "region_raw"), ("area", "location_area"),
+                         ("city", "city"), ("sellerName", "agent_name"),
+                         ("contact", "agent_phone"), ("listTime", "posted_at"),
+                         ("body", "description")):
+        if isinstance(ad.get(k_src), (str, int, float)):
+            out[k_dst] = ad[k_src]
+
+    params = ad.get("parameters") or ad.get("attributes")
+    if isinstance(params, list):
+        for p in params:
+            if not isinstance(p, dict):
+                continue
+            label = (p.get("label") or p.get("name") or "").lower()
+            val = p.get("value")
+            if not label or val is None:
+                continue
+            if "bedroom" in label:
+                m = re.search(r"\d+", str(val))
+                if m:
+                    out["bedrooms"] = int(m.group(0))
+            elif "bathroom" in label:
+                m = re.search(r"\d+", str(val))
+                if m:
+                    out["bathrooms"] = int(m.group(0))
+            elif "built" in label or "size" in label:
+                m = re.search(r"[\d,]+", str(val))
+                if m:
+                    try:
+                        out["built_up_sqft"] = int(m.group(0).replace(",", ""))
+                    except ValueError:
+                        pass
+            elif "land" in label:
+                m = re.search(r"[\d,]+", str(val))
+                if m:
+                    try:
+                        out["land_sqft"] = int(m.group(0).replace(",", ""))
+                    except ValueError:
+                        pass
+            elif "tenure" in label:
+                out["tenure"] = str(val)
+            elif "furnish" in label:
+                out["furnishing"] = str(val)
+
+    imgs = ad.get("images") or ad.get("mediaList") or []
+    if isinstance(imgs, list):
+        collected: List[str] = []
+        for it in imgs:
+            if isinstance(it, str) and it.startswith("http"):
+                collected.append(it)
+            elif isinstance(it, dict):
+                for k in ("url", "large", "medium"):
+                    v = it.get(k)
+                    if isinstance(v, str) and v.startswith("http"):
+                        collected.append(v); break
+        if collected:
+            out["image_urls"] = collected[:8]
+    return out
+
+
 def _parse_detail(html: str, url: str, region: str, type_key: str) -> Dict:
     soup = BeautifulSoup(html, "html.parser")
 
-    title = None
-    h1 = soup.find("h1")
-    if h1:
-        title = h1.get_text(strip=True)
+    # Prefer the structured __NEXT_DATA__ payload; degrade to DOM scraping.
+    nd = _extract_next_data(soup)
+    nd_fields: Dict = _parse_from_next_data(nd) if nd else {}
+
+    title = nd_fields.get("title")
+    if not title:
+        h1 = soup.find("h1")
+        if h1:
+            title = h1.get_text(strip=True)
     if not title:
         og = soup.find("meta", property="og:title")
         if og:
@@ -180,10 +286,11 @@ def _parse_detail(html: str, url: str, region: str, type_key: str) -> Dict:
 
     text = soup.get_text(" ", strip=True)
 
-    price = None
-    price_el = soup.select_one('[data-testid="ad-price"]')
-    if price_el:
-        price = _clean_price(price_el.get_text(strip=True))
+    price = nd_fields.get("price")
+    if price is None:
+        price_el = soup.select_one('[data-testid="ad-price"]')
+        if price_el:
+            price = _clean_price(price_el.get_text(strip=True))
     if price is None:
         price = _clean_price(text)
 
@@ -191,35 +298,40 @@ def _parse_detail(html: str, url: str, region: str, type_key: str) -> Dict:
     baths_m = _BATH_RE.search(text)
     sqft_m = _SQFT_RE.search(text)
 
-    images: List[str] = []
-    for img in soup.find_all("img"):
-        src = img.get("src") or img.get("data-src") or ""
-        if not src or any(x in src.lower() for x in ("logo", "icon", "avatar", "placeholder")):
-            continue
-        if src.startswith("http"):
-            images.append(src)
+    images: List[str] = list(nd_fields.get("image_urls") or [])
+    if not images:
+        for img in soup.find_all("img"):
+            src = img.get("src") or img.get("data-src") or ""
+            if not src or any(x in src.lower() for x in ("logo", "icon", "avatar", "placeholder")):
+                continue
+            if src.startswith("http"):
+                images.append(src)
 
-    desc = ""
-    desc_el = soup.select_one("#property-adview-description") or soup.select_one('[data-testid="ad-description"]')
-    if desc_el:
-        for btn in desc_el.select("button"):
-            btn.decompose()
-        desc = re.sub(r"\n{2,}", "\n", desc_el.get_text("\n", strip=True))
+    desc = nd_fields.get("description") or ""
+    if not desc:
+        desc_el = soup.select_one("#property-adview-description") or soup.select_one('[data-testid="ad-description"]')
+        if desc_el:
+            for btn in desc_el.select("button"):
+                btn.decompose()
+            desc = re.sub(r"\n{2,}", "\n", desc_el.get_text("\n", strip=True))
 
-    loc_area = None
-    meta_kw = soup.find("meta", {"name": "keywords"})
-    if meta_kw:
-        loc_area = (meta_kw.get("content") or "").split(",")[0].strip() or None
+    loc_area = nd_fields.get("location_area")
+    if not loc_area:
+        meta_kw = soup.find("meta", {"name": "keywords"})
+        if meta_kw:
+            loc_area = (meta_kw.get("content") or "").split(",")[0].strip() or None
 
-    agent_name = None
-    agent_el = soup.select_one('[data-testid="seller-name"], [class*="seller-name"]')
-    if agent_el:
-        agent_name = agent_el.get_text(strip=True)
+    agent_name = nd_fields.get("agent_name")
+    if not agent_name:
+        agent_el = soup.select_one('[data-testid="seller-name"], [class*="seller-name"]')
+        if agent_el:
+            agent_name = agent_el.get_text(strip=True)
 
-    agent_phone = None
-    phone_match = re.search(r"\+?60\s*\d[\d\s-]{6,}", text)
-    if phone_match:
-        agent_phone = phone_match.group(0).strip()
+    agent_phone = nd_fields.get("agent_phone")
+    if not agent_phone:
+        phone_match = re.search(r"\+?60\s*\d[\d\s-]{6,}", text)
+        if phone_match:
+            agent_phone = phone_match.group(0).strip()
 
     return {
         "listing_url": url,
@@ -231,16 +343,19 @@ def _parse_detail(html: str, url: str, region: str, type_key: str) -> Dict:
         "property_type": type_key,
         "region": region,
         "location_area": loc_area,
-        "city": loc_area,
-        "bedrooms": int(beds_m.group(1)) if beds_m else None,
-        "bathrooms": int(baths_m.group(1)) if baths_m else None,
-        "built_up_sqft": int(sqft_m.group(1).replace(",", "")) if sqft_m else None,
-        "land_sqft": None,
-        "tenure": None,
-        "furnishing": None,
+        "city": nd_fields.get("city") or loc_area,
+        "bedrooms": nd_fields.get("bedrooms") if nd_fields.get("bedrooms") is not None
+                    else (int(beds_m.group(1)) if beds_m else None),
+        "bathrooms": nd_fields.get("bathrooms") if nd_fields.get("bathrooms") is not None
+                    else (int(baths_m.group(1)) if baths_m else None),
+        "built_up_sqft": nd_fields.get("built_up_sqft") if nd_fields.get("built_up_sqft") is not None
+                    else (int(sqft_m.group(1).replace(",", "")) if sqft_m else None),
+        "land_sqft": nd_fields.get("land_sqft"),
+        "tenure": nd_fields.get("tenure"),
+        "furnishing": nd_fields.get("furnishing"),
         "agent_name": agent_name,
         "agent_phone": agent_phone,
-        "posted_at": None,
+        "posted_at": nd_fields.get("posted_at"),
         "description": desc or None,
         "image_urls": images[:8],
     }
@@ -255,6 +370,9 @@ async def scrape_region_type(
     on_progress: Optional[Callable[[str], Awaitable[None]]] = None,
 ) -> List[Dict]:
     """Scrape Mudah.my for one (region,type) up to target_count listings."""
+    if target_count <= 0:
+        return []
+
     start = time.monotonic()
     deadline = start + GLOBAL_DEADLINE_SEC
 
@@ -266,12 +384,12 @@ async def scrape_region_type(
     seen_urls: set[str] = set()
 
     async with httpx.AsyncClient(http2=False) as client:
-        # 1. listing pages
         listing_urls: List[str] = []
         for page in range(1, MAX_PAGES_PER_QUERY + 1):
             if time.monotonic() > deadline:
                 break
             url = _build_search_url(region, type_key, page)
+            html: Optional[str] = None
             try:
                 async with host_sem:
                     html = await _get(client, url)
@@ -282,6 +400,8 @@ async def scrape_region_type(
                 except Exception:
                     break
             except Exception:
+                continue
+            if not html:
                 continue
             urls = _extract_listing_urls(html)
             new = [u for u in urls if u not in seen_urls]
@@ -295,34 +415,27 @@ async def scrape_region_type(
             if len(listing_urls) >= target_count * 2:
                 break
 
-        # 2. detail fetch (cap to target_count + buffer)
         async def fetch_one(u: str) -> Optional[Dict]:
             if time.monotonic() > deadline:
                 return None
             try:
                 async with detail_sem:
                     if use_playwright:
-                        html = await _playwright_get(u)
+                        html_ = await _playwright_get(u)
                     else:
-                        html = await _get(client, u)
+                        html_ = await _get(client, u)
             except ScraperBanned:
                 try:
-                    html = await _playwright_get(u)
+                    html_ = await _playwright_get(u)
                 except Exception:
                     return None
             except Exception:
                 return None
             try:
-                return _parse_detail(html, u, region, type_key)
+                return _parse_detail(html_, u, region, type_key)
             except Exception:
                 return None
 
-        # Wrap coros in real Tasks so we can cancel pending work once we
-        # have enough results. Using asyncio.as_completed(list_of_coros) +
-        # break leaks the unfinished coroutines AND triggers the
-        # "Task exception was never retrieved" warnings you saw — every
-        # background coro that later raises (Playwright/httpx) has nowhere
-        # to deliver its exception. Explicit cancel + gather fixes both.
         tasks: List[asyncio.Task] = [
             asyncio.create_task(fetch_one(u)) for u in listing_urls[: target_count + 20]
         ]
@@ -338,8 +451,6 @@ async def scrape_region_type(
             for t in pending:
                 t.cancel()
             if pending:
-                # Drain cancellations / retrieve any straggler exceptions so
-                # asyncio does not log "Task exception was never retrieved".
                 await asyncio.gather(*pending, return_exceptions=True)
 
     return collected
