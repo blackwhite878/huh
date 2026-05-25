@@ -42,6 +42,11 @@ from search_pipeline import execute_search_pipeline
 from scraper import seeder as _scraper_seeder, storage as _scraper_storage
 from scraper.pipeline import run_pipeline as run_scraper_pipeline
 
+import asyncio
+import sys
+
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 # FastAPI app setup
 app = FastAPI(

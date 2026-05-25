@@ -1,0 +1,88 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Lovable <noreply@lovable.dev>
+Date: Mon, 25 May 2026 00:00:00 +0000
+Subject: [PATCH] Add boot-id session reset (new files only)
+
+---
+ backend/session_state.py      | 22 +++++++++++++++++++
+ frontend/src/lib/bootGuard.ts | 41 +++++++++++++++++++++++++++++++++++
+ 2 files changed, 63 insertions(+)
+ create mode 100644 backend/session_state.py
+ create mode 100644 frontend/src/lib/bootGuard.ts
+
+diff --git a/backend/session_state.py b/backend/session_state.py
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/backend/session_state.py
+@@ -0,0 +1,22 @@
++"""Process-wide session state. Reset every time FastAPI (re)starts."""
++from __future__ import annotations
++import uuid
++from typing import Any, Dict
++
++# New UUID per Python process => new uvicorn worker => new "session".
++BOOT_ID: str = uuid.uuid4().hex
++
++# In-memory caches that should NOT survive a restart.
++SESSION_STORE: Dict[str, Any] = {}
++RANKING_WEIGHTS_CACHE: Dict[str, Any] = {}
++SCRAPE_TEMPO_CACHE: Dict[str, Any] = {}
++
++
++def reset_all() -> None:
++    """Hard-clear every in-memory session structure."""
++    SESSION_STORE.clear()
++    RANKING_WEIGHTS_CACHE.clear()
++    SCRAPE_TEMPO_CACHE.clear()
++
++
++__all__ = ["BOOT_ID", "SESSION_STORE", "RANKING_WEIGHTS_CACHE", "SCRAPE_TEMPO_CACHE", "reset_all"]
+diff --git a/frontend/src/lib/bootGuard.ts b/frontend/src/lib/bootGuard.ts
+new file mode 100644
+index 0000000..2222222
+--- /dev/null
++++ b/frontend/src/lib/bootGuard.ts
+@@ -0,0 +1,41 @@
++/**
++ * Boot-id handshake: clears local/session storage whenever the backend
++ * process has restarted (its in-memory BOOT_ID changes per process),
++ * and once per fresh tab load so a frontend restart also resets.
++ */
++const STORAGE_KEY = "wsdfc.bootId";
++const TAB_FLAG = "wsdfc.tabBooted";
++const API_BASE =
++  (import.meta as any).env?.VITE_API_BASE ?? "http://localhost:8000";
++
++export async function runBootGuard(): Promise<void> {
++  // 1) Fresh tab load => always re-handshake (handles frontend restart).
++  if (!sessionStorage.getItem(TAB_FLAG)) {
++    localStorage.removeItem(STORAGE_KEY);
++    sessionStorage.setItem(TAB_FLAG, "1");
++  }
++
++  // 2) Compare backend boot id (handles backend restart).
++  try {
++    const res = await fetch(`${API_BASE}/session/boot-id`, { cache: "no-store" });
++    if (!res.ok) return;
++    const { boot_id } = (await res.json()) as { boot_id: string };
++    const prev = localStorage.getItem(STORAGE_KEY);
++    if (prev && prev !== boot_id) {
++      const url = new URL(window.location.href);
++      localStorage.clear();
++      sessionStorage.clear();
++      sessionStorage.setItem(TAB_FLAG, "1");
++      localStorage.setItem(STORAGE_KEY, boot_id);
++      if (!url.searchParams.get("_reset")) {
++        url.searchParams.set("_reset", "1");
++        window.location.replace(url.toString());
++        return;
++      }
++    }
++    localStorage.setItem(STORAGE_KEY, boot_id);
++  } catch {
++    /* backend down — leave state as-is */
++  }
++}
+-- 
+2.40.0

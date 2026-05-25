@@ -12,5 +12,5 @@ llm:
 #                     forced_demo=true via GET /api/v1/system_status so the
 #                     frontend can show a popup.
 scraper:
-  mode: demo
+  mode: realtime
   retries: 3
