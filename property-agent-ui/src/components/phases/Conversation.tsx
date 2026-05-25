@@ -345,7 +345,7 @@ export function Conversation() {
             {locked && <Lock className="h-4 w-4 text-muted-foreground" />}
             <input
               value={input}
-              onChange={(e) => setInput(e.target.value)}
+              onChange={(e) => setInput(e.target.value.slice(0, 600))}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
@@ -353,6 +353,7 @@ export function Conversation() {
                 }
               }}
               disabled={locked}
+              maxLength={600}
               placeholder={
                 locked
                   ? "Input locked while the agent works…"
@@ -360,10 +361,23 @@ export function Conversation() {
               }
               className="flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
             />
+            <span
+              className={[
+                "select-none font-mono text-[10px] tabular-nums",
+                input.length >= 600
+                  ? "text-destructive"
+                  : input.length > 540
+                    ? "text-amber-500"
+                    : "text-muted-foreground/70",
+              ].join(" ")}
+              aria-label="character count"
+            >
+              {input.length}/600
+            </span>
             <Button
               size="icon"
               onClick={send}
-              disabled={locked || !input.trim()}
+              disabled={locked || !input.trim() || input.length > 600}
               className="h-9 w-9 rounded-lg bg-gradient-to-br from-primary to-primary-glow text-primary-foreground"
             >
               <Send className="h-4 w-4" />
