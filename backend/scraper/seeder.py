@@ -247,6 +247,67 @@ async def fetch_realtime_into_tempo(
     return counts
 
 
+# ── pure_fetch: scrape ALL regions × ALL types, save ONLY to long-term CSV
+async def fetch_pure_into_longterm(
+    regions: Optional[List[str]] = None,
+    *,
+    per_region_concurrency: int = REGION_TYPE_CONCURRENCY,
+    region_concurrency: int = 2,
+) -> Dict[str, Dict[str, int]]:
+    """Pure-fetch mode: scrape every (region, type) combination, skipping
+    Playwright augmentation for speed (~5–10× faster than realtime), and
+    append results to the long-term CSV only. No session tempo, no ranking.
+
+    `region_concurrency` controls how many regions are scraped in parallel.
+    Within a region, `per_region_concurrency` types run in parallel. The
+    global realtime URL BUDGET is explicitly disabled so this mode is
+    unbounded by per-session caps; only MAX_PER_REGION × MAX_PAGES_PER_QUERY
+    and the per-region wall-clock GLOBAL_DEADLINE_SEC apply.
+    """
+    from .mudah_scraper import scrape_region_type as _scrape, BUDGET as _BUDGET
+    _BUDGET.disable()
+
+    regions = regions or list(MY_REGIONS)
+    counts: Dict[str, Dict[str, int]] = {}
+    region_sem = asyncio.Semaphore(max(1, region_concurrency))
+
+    async def _do_region(region: str) -> None:
+        async with region_sem:
+            type_sem = asyncio.Semaphore(max(1, per_region_concurrency))
+            per_type: Dict[str, int] = {}
+
+            async def _do_type(type_key: str, quota: int) -> None:
+                async with type_sem:
+                    try:
+                        rows = await _scrape(
+                            region, type_key, quota,
+                            filters=None, skip_playwright=True,
+                        )
+                    except Exception as e:
+                        logger.warning("[pure_fetch] %s/%s scrape raised: %r",
+                                       region, type_key, e)
+                        rows = []
+                    written = storage.append_longterm(region, rows) if rows else 0
+                    per_type[type_key] = written
+                    logger.info("[pure_fetch] %s/%s scraped=%d written=%d",
+                                region, type_key, len(rows), written)
+
+            await asyncio.gather(
+                *[_do_type(t, q) for t, q in TYPE_QUOTA.items()],
+                return_exceptions=True,
+            )
+            counts[region] = per_type
+            total_now = storage.longterm_count(region)
+            logger.info("[pure_fetch] %s done: per_type=%s longterm_total=%d",
+                        region, per_type, total_now)
+
+    await asyncio.gather(*[_do_region(r) for r in regions], return_exceptions=True)
+    return counts
+
+
+
+
+
 # ── retry orchestrator ────────────────────────────────────────────────
 async def run_with_retry_then_demo(
     realtime_coro: Callable[[], Awaitable[Dict[str, int]]],

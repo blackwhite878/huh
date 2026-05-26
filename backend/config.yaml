@@ -6,11 +6,15 @@ llm:
   concurrency: 3
 
 # ── scraper subsystem (Mudah.my) ──────────────────────────────────────
-# mode: "demo"      → use long-term CSV under backend/data/states/
-#       "realtime"  → scrape Mudah.my live; on 3 consecutive failures the
-#                     system auto-degrades to demo and exposes
-#                     forced_demo=true via GET /api/v1/system_status so the
-#                     frontend can show a popup.
+# mode: "demo"       → use long-term CSV under backend/data/states/
+#       "realtime"   → scrape Mudah.my live; on 3 consecutive failures the
+#                      system auto-degrades to demo and exposes
+#                      forced_demo=true via GET /api/v1/system_status so the
+#                      frontend can show a popup.
+#       "pure_fetch" → bulk-refresh: scrape ALL MY_REGIONS × ALL TYPE_QUOTA
+#                      with Playwright augmentation DISABLED for speed,
+#                      append to long-term CSV (pandas-merged, dedup by
+#                      listing_url). Ignores brief.target. No ranking.
 scraper:
   mode: "realtime"
   retries: 3

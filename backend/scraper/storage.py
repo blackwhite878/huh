@@ -1,10 +1,10 @@
 """
 Long-term CSV + temporary JSON store for scraped Mudah listings.
 
-Storage format is aligned 1:1 with mudah_scraper._parse_detail() output
-(see schemas.ScrapedProperty). Every field returned by the scraper is
-persisted; list and dict fields are JSON-serialized in CSV cells so no
-information is lost on round-trip.
+CSV schema is aligned 1:1 with mudah_scraper._parse_detail() output.
+List / dict fields are JSON-encoded in CSV cells so commas survive
+round-trips. Long-term CSV is read/written via pandas so column unions
+across schema upgrades are handled automatically (no header drift).
 
 Layout (relative to backend/):
 - data/states/{region}.csv          long-term, accumulative
@@ -12,13 +12,14 @@ Layout (relative to backend/):
 - tempo_data/ranked/{session_id}.json  ranking agent output
 """
 from __future__ import annotations
-import csv
 import json
 import logging
 import shutil
 import threading
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
+
+import pandas as pd
 
 from schemas import ScrapedProperty
 
@@ -27,25 +28,79 @@ DATA_DIR    = BACKEND_DIR / "data"     / "states"
 TEMPO_DIR   = BACKEND_DIR / "tempo_data" / "states"
 RANKED_DIR  = BACKEND_DIR / "tempo_data" / "ranked"
 
-# Mirrors schemas.ScrapedProperty / mudah_scraper._parse_detail output.
+# Mirrors mudah_scraper._parse_detail() return dict (full ~80 cols).
+# `listing_url` is FIRST and is the dedup key. `canonical_url` is kept
+# as an alias for backward-compat with older readers.
 CSV_FIELDS: List[str] = [
-    "listing_url", "list_id", "source", "scraped_at",
-    "title", "price", "currency",
-    "property_type", "category_name",
-    "region", "location_area", "city",
-    "bedrooms", "bathrooms",
-    "built_up_sqft", "land_sqft",
-    "tenure", "furnishing",
-    "land_title", "property_type_specific",
-    "agent_name", "agent_phone",
-    "posted_at",
-    "description",
-    "image_urls",      # JSON-encoded list
-    "raw_attributes",  # JSON-encoded dict (dynamic Mudah parameters)
+    # AD METADATA
+    "listing_url", "canonical_url", "list_id", "title", "description",
+    "posted_at", "ad_status", "is_featured", "category_name",
+    # PRICING
+    "price", "price_display", "currency", "price_per_sqft",
+    # LOCATION
+    "region", "area", "state", "full_address", "postcode",
+    "latitude", "longitude",
+    # PROPERTY CORE
+    "transaction_type", "property_type", "property_sub_type",
+    "size_sqft", "land_area", "land_area_unit",
+    "bedrooms", "bathrooms", "carpark", "floor_range", "total_floors_unit",
+    "furnishing", "condition", "facing_direction", "unit_type", "is_tenanted",
+    # TENURE & LEGAL
+    "tenure_type", "remaining_tenure", "land_title", "strata_title",
+    # FINANCIAL
+    "maintenance_fee", "assessment_tax", "deposit_months",
+    "utility_deposit_months", "mortgage_estimate", "mortgage_rate",
+    # FACILITIES & AMENITIES (Playwright-populated; may be empty in pure_fetch)
+    "facilities_list", "nearby_bus_stops", "nearby_schools",
+    "nearby_parks", "nearby_hospitals", "nearby_shopping",
+    # DEVELOPMENT
+    "development_name", "development_url", "developer",
+    "completion_year", "total_floors", "total_units",
+    # IMAGES
+    "image_urls", "image_count",
+    # SELLER / AGENT
+    "seller_name", "seller_type", "seller_profile_url", "seller_logo_url",
+    "ren_number", "firm_license", "is_verified", "total_ads",
+    "agent_phone", "agent_whatsapp",
+    # SEO
+    "og_title", "og_description", "og_image", "meta_description",
+    # METADATA
+    "source", "scraped_at",
+    # Legacy raw bag (pre-refactor CSVs may still hold this).
+    "raw_attributes",
 ]
 
-_LIST_FIELDS = {"image_urls"}
-_JSON_FIELDS = {"image_urls", "raw_attributes"}
+# Columns serialized as JSON in CSV cells.
+_LIST_FIELDS = {
+    "image_urls",
+    "facilities_list", "nearby_bus_stops", "nearby_schools",
+    "nearby_parks", "nearby_hospitals", "nearby_shopping",
+}
+_DICT_FIELDS = {"raw_attributes"}
+_JSON_FIELDS = _LIST_FIELDS | _DICT_FIELDS
+
+# Numeric coercion on read.
+_FLOAT_FIELDS = {
+    "price", "price_per_sqft", "latitude", "longitude",
+    "maintenance_fee", "assessment_tax", "mortgage_estimate",
+    "mortgage_rate", "land_area",
+}
+_INT_FIELDS = {
+    "bedrooms", "bathrooms", "size_sqft", "carpark", "total_floors",
+    "total_units", "completion_year", "image_count", "total_ads",
+    "deposit_months", "utility_deposit_months",
+}
+
+# Backward-compat: legacy CSVs (pre-schema-extension) used these names.
+_LEGACY_ALIAS: Dict[str, str] = {
+    "location_area": "area",
+    "city": "area",
+    "built_up_sqft": "size_sqft",
+    "land_sqft": "land_area",
+    "tenure": "tenure_type",
+    "property_type_specific": "property_sub_type",
+    "agent_name": "seller_name",
+}
 
 _write_lock = threading.Lock()
 logger = logging.getLogger(__name__)
@@ -77,94 +132,145 @@ def csv_path(region: str) -> Path:
     return DATA_DIR / f"{region}.csv"
 
 
-def _row_for_csv(r: Dict) -> Dict:
-    out: Dict = {}
-    for k in CSV_FIELDS:
-        v = r.get(k)
-        if v is None:
-            out[k] = ""
-            continue
-        if k in _JSON_FIELDS:
-            # Always JSON-encode lists/dicts so commas/semicolons survive.
-            try:
-                out[k] = json.dumps(v, ensure_ascii=False)
-            except (TypeError, ValueError):
-                out[k] = ""
-        else:
-            out[k] = v
-    unknown = [k for k in r.keys() if k not in CSV_FIELDS]
-    if unknown:
-        logger.debug("append_longterm: dropping unknown fields %s", unknown)
-    return out
+def _encode_for_csv(v: Any, key: str) -> Any:
+    if v is None:
+        return ""
+    if key in _JSON_FIELDS:
+        try:
+            return json.dumps(v, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return ""
+    return v
 
 
-def _row_from_csv(r: Dict) -> Dict:
-    out: Dict[str, Any] = dict(r)
-    for k in _JSON_FIELDS:
-        v = out.get(k)
-        if not v:
-            out[k] = [] if k in _LIST_FIELDS else {}
-            continue
-        if isinstance(v, str):
-            try:
-                out[k] = json.loads(v)
-            except (TypeError, ValueError):
-                # Backward-compat with the old ';'-joined image_urls format.
-                if k == "image_urls":
-                    out[k] = [x for x in v.split(";") if x]
-                else:
-                    out[k] = {}
-    # Coerce numerics so downstream scorers don't need to.
-    for num_k in ("price",):
-        v = out.get(num_k)
-        if isinstance(v, str) and v:
-            try: out[num_k] = float(v)
-            except ValueError: out[num_k] = None
-        elif v == "":
-            out[num_k] = None
-    for int_k in ("bedrooms", "bathrooms", "built_up_sqft", "land_sqft"):
-        v = out.get(int_k)
-        if isinstance(v, str) and v:
-            try: out[int_k] = int(float(v))
-            except ValueError: out[int_k] = None
-        elif v == "":
-            out[int_k] = None
-    return out
+def _decode_from_csv(v: Any, key: str) -> Any:
+    # pandas NaN / empty cell → None.
+    if v is None or (isinstance(v, float) and pd.isna(v)) or v == "":
+        if key in _LIST_FIELDS:
+            return []
+        if key in _DICT_FIELDS:
+            return {}
+        return None
+    if key in _JSON_FIELDS and isinstance(v, str):
+        try:
+            return json.loads(v)
+        except (TypeError, ValueError):
+            # Legacy ';'-joined image_urls format.
+            if key == "image_urls":
+                return [x for x in v.split(";") if x]
+            return [] if key in _LIST_FIELDS else {}
+    if key in _FLOAT_FIELDS and isinstance(v, str):
+        try:
+            return float(v)
+        except ValueError:
+            return None
+    if key in _INT_FIELDS and isinstance(v, str):
+        try:
+            return int(float(v))
+        except ValueError:
+            return None
+    if key in _FLOAT_FIELDS and isinstance(v, (int, float)) and not pd.isna(v):
+        return float(v)
+    if key in _INT_FIELDS and isinstance(v, (int, float)) and not pd.isna(v):
+        return int(v)
+    return v
+
+
+def _normalize_alias_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Fold legacy column names into the canonical CSV_FIELDS names."""
+    rename: Dict[str, str] = {}
+    for old, new in _LEGACY_ALIAS.items():
+        if old in df.columns and new not in df.columns:
+            rename[old] = new
+    if rename:
+        df = df.rename(columns=rename)
+    # canonical_url ←→ listing_url backfill (old CSVs only had canonical_url).
+    if "canonical_url" in df.columns and "listing_url" not in df.columns:
+        df["listing_url"] = df["canonical_url"]
+    elif "listing_url" in df.columns and "canonical_url" not in df.columns:
+        df["canonical_url"] = df["listing_url"]
+    return df
+
+
+def _read_csv_df(p: Path) -> pd.DataFrame:
+    if not p.exists() or p.stat().st_size == 0:
+        return pd.DataFrame(columns=CSV_FIELDS)
+    # Read everything as string; we decode types ourselves.
+    df = pd.read_csv(p, dtype=str, keep_default_na=False, na_values=[""])
+    return _normalize_alias_columns(df)
 
 
 def load_longterm(region: str) -> List[Dict]:
-    p = csv_path(region)
-    if not p.exists():
+    df = _read_csv_df(csv_path(region))
+    if df.empty:
         return []
-    with p.open("r", encoding="utf-8", newline="") as f:
-        return [_row_from_csv(r) for r in csv.DictReader(f)]
+    cols = list(df.columns)
+    out: List[Dict] = []
+    for rec in df.to_dict(orient="records"):
+        out.append({k: _decode_from_csv(rec.get(k), k) for k in cols})
+    return out
 
 
 def longterm_count(region: str) -> int:
-    return len(load_longterm(region))
+    p = csv_path(region)
+    if not p.exists() or p.stat().st_size == 0:
+        return 0
+    # Lightweight: count lines minus header.
+    with p.open("r", encoding="utf-8") as f:
+        return max(0, sum(1 for _ in f) - 1)
 
 
 def append_longterm(region: str, rows: Iterable[Dict]) -> int:
-    p = csv_path(region)
-    existing_urls = {r["listing_url"] for r in load_longterm(region)}
-    new_rows: List[Dict] = []
+    """Append rows to long-term CSV, deduped by listing_url. Uses pandas so
+    column unions across schema upgrades are handled (old narrow CSVs gain
+    new columns without truncation; new wide rows preserve every field)."""
+    new_records: List[Dict] = []
     seen_in_batch: set = set()
     for r in rows:
-        url = r.get("listing_url")
-        if not url or url in existing_urls or url in seen_in_batch:
+        url = r.get("listing_url") or r.get("canonical_url")
+        if not url or url in seen_in_batch:
             continue
         seen_in_batch.add(url)
-        new_rows.append(r)
-    if not new_rows:
+        # Mirror the URL into both keys for downstream compat.
+        rec = dict(r)
+        rec.setdefault("listing_url", url)
+        rec.setdefault("canonical_url", url)
+        new_records.append(rec)
+    if not new_records:
         return 0
-    file_exists = p.exists() and p.stat().st_size > 0
-    with _write_lock, p.open("a", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=CSV_FIELDS, extrasaction="ignore")
-        if not file_exists:
-            w.writeheader()
-        for r in new_rows:
-            w.writerow(_row_for_csv(r))
-    return len(new_rows)
+
+    p = csv_path(region)
+    with _write_lock:
+        existing = _read_csv_df(p)
+        existing_urls: set = (
+            set(existing["listing_url"].dropna().tolist())
+            if "listing_url" in existing.columns else set()
+        )
+        truly_new = [r for r in new_records if r["listing_url"] not in existing_urls]
+        if not truly_new:
+            return 0
+
+        new_df = pd.DataFrame(
+            [{k: _encode_for_csv(r.get(k), k) for k in CSV_FIELDS} for r in truly_new]
+        )
+        if existing.empty:
+            merged = new_df
+        else:
+            # Union columns; CSV_FIELDS order first, then any extras.
+            all_cols = list(dict.fromkeys(CSV_FIELDS + list(existing.columns)))
+            existing = existing.reindex(columns=all_cols, fill_value="")
+            new_df = new_df.reindex(columns=all_cols, fill_value="")
+            merged = pd.concat([existing, new_df], ignore_index=True)
+
+        # Defensive dedup (pandas-arranged: keep last, stable sort by region+price).
+        merged = merged.drop_duplicates(subset=["listing_url"], keep="last")
+        if "region" in merged.columns:
+            merged = merged.sort_values(
+                by=["region", "listing_url"], kind="stable", na_position="last"
+            ).reset_index(drop=True)
+
+        merged.to_csv(p, index=False, encoding="utf-8")
+        return len(truly_new)
 
 
 # ─── tempo JSON ────────────────────────────────────────────────────
@@ -183,27 +289,20 @@ def write_tempo(region: str, session_id: str, rows: List[ScrapedProperty]) -> Pa
 
 
 def append_tempo(region: str, session_id: str, rows: List[Dict]) -> int:
-    """Append scraped dict rows into the session tempo JSON, dedup by URL.
-
-    BUG FIX: the previous implementation declared rows as List[ScrapedProperty]
-    and used attribute access (r.listing_url, r.model_dump()), but every real
-    call site (seeder._scrape_one_type_persist) passes plain dicts produced by
-    mudah_scraper._parse_detail. That raised AttributeError on the first
-    realtime success. It also read existing rows via dict.get while read_tempo
-    returned Pydantic models — that path raised AttributeError too. Treat
-    rows + existing uniformly as dicts; write_tempo already accepts both.
-    """
+    """Append scraped dict rows into the session tempo JSON, dedup by URL."""
     existing = read_tempo(region, session_id)
-    existing_urls = {r.get("listing_url") for r in existing if r.get("listing_url")}
+    existing_urls = {r.get("listing_url") or r.get("canonical_url")
+                     for r in existing if (r.get("listing_url") or r.get("canonical_url"))}
     merged: List[Dict] = list(existing)
     added = 0
     seen_in_batch: set = set()
     for r in rows:
-        url = r.get("listing_url") if isinstance(r, dict) else getattr(r, "listing_url", None)
+        d = r if isinstance(r, dict) else r.model_dump()
+        url = d.get("listing_url") or d.get("canonical_url")
         if not url or url in existing_urls or url in seen_in_batch:
             continue
         seen_in_batch.add(url)
-        merged.append(r if isinstance(r, dict) else r.model_dump())
+        merged.append(d)
         added += 1
     if added:
         write_tempo(region, session_id, merged)
@@ -211,15 +310,6 @@ def append_tempo(region: str, session_id: str, rows: List[Dict]) -> int:
 
 
 def read_tempo(region: str, session_id: str) -> List[Dict]:
-    """Read the per-session tempo JSON as a list of dicts.
-
-    BUG FIX: previously returned List[ScrapedProperty]; every downstream
-    consumer (search_pipeline._row_to_property and scraper.ranking_agent
-    ._score_one) then called .get() on the items, which only exists on
-    dicts and raised AttributeError. The on-disk format is JSON dicts,
-    so returning them verbatim is both correct and 1:1 with what
-    write_tempo serialized.
-    """
     p = tempo_path(region, session_id)
     if not p.exists():
         return []

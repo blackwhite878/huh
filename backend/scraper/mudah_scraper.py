@@ -873,6 +873,10 @@ def _parse_detail(html: str, url: str, region: str, type_key: str) -> Dict:
     return {
         # AD METADATA
         "list_id": list_id,
+        # listing_url is the canonical key used by storage layer for dedup +
+        # CSV write. canonical_url kept for backward-compat with existing
+        # downstream consumers (scrape_region_type filter, ranking agent).
+        "listing_url": url,
         "canonical_url": url,
         "title": title,
         "description": desc or None,
@@ -1016,7 +1020,11 @@ async def scrape_region_type(
         *,
         on_progress: Optional[Callable[[str], Awaitable[None]]] = None,
         filters: Optional[Dict] = None,
+        skip_playwright: bool = False,
 ) -> List[Dict]:
+    """Scrape one (region,type). `skip_playwright=True` disables the
+    per-property phone/whatsapp/gallery/amenities augmentation, trading
+    completeness for a 5–10× speedup (used by `pure_fetch` mode)."""
     if target_count <= 0:
         return []
 
@@ -1088,8 +1096,9 @@ async def scrape_region_type(
                 return None
             try:
                 detail = _parse_detail(html_, u, region, type_key)
-                # Populate Playwright-gated fields
-                detail = await _populate_playwright_fields(detail, u)
+                # Populate Playwright-gated fields (skipped in pure_fetch mode).
+                if not skip_playwright:
+                    detail = await _populate_playwright_fields(detail, u)
                 # Per-property observability (replaces silent 200 OK only).
                 try:
                     print(

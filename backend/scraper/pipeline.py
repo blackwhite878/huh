@@ -30,7 +30,7 @@ def _load_mode() -> str:
     except Exception as e:
         logger.warning("config.yaml unreadable (%s); defaulting to demo", e)
         mode = "demo"
-    if mode not in ("demo", "realtime"):
+    if mode not in ("demo", "realtime", "pure_fetch"):
         mode = "demo"
     return mode
 
@@ -122,6 +122,22 @@ async def run_pipeline(session_id: str, brief: Dict) -> Dict:
     # ensure session tempo is fresh
     storage.clear_session_tempo(session_id)
     seeder.reset_flags()  # per-search reset; FLAGS.forced_demo will re-arm on failure
+
+    if mode == "pure_fetch":
+        # Bulk-refresh mode: scrape ALL MY_REGIONS × ALL TYPE_QUOTA into the
+        # long-term CSV (pandas-merged, dedup by listing_url). No tempo, no
+        # ranking. Ignores brief.target by design.
+        from .types_quota import MY_REGIONS as _ALL_REGIONS
+        pure_counts = await seeder.fetch_pure_into_longterm(list(_ALL_REGIONS))
+        return {
+            "mode_requested": mode,
+            "forced_demo": False,
+            "last_error": None,
+            "regions": list(_ALL_REGIONS),
+            "tempo_counts": {r: sum(v.values()) for r, v in pure_counts.items()},
+            "pure_fetch_breakdown": pure_counts,
+            "ranked": [],
+        }
 
     if mode == "realtime":
         # v2: honor optional per-region wall-clock budget from config.yaml.
