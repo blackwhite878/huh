@@ -1,0 +1,300 @@
+diff --git a/backend/main.py b/backend/main.py
+index 861e590..5bfb176 100644
+--- a/backend/main.py
++++ b/backend/main.py
+@@ -85,7 +85,10 @@ async def _wipe_tempo_on_startup() -> None:
+     _scraper_seeder.reset_flags()
+     clear_all_in_memory_sessions()
+ 
+-app.add_event_handler("startup", _wipe_tempo_on_startup)
++# (Removed duplicate add_event_handler — the @app.on_event("startup")
++# decorator above already registers _wipe_tempo_on_startup. Registering it
++# twice caused the tempo wipe + clear_all_in_memory_sessions to run twice on
++# every boot, which races with anything that depends on FLAGS being reset.)
+ 
+ 
+ # ─── 4.0 GET /api/v1/system_status — frontend popup gate ─────────────
+@@ -662,6 +665,14 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
+         )
+ 
+     # Add user message to history
++    # REVIEW (low-risk, not auto-fixed): this writes the user turn BEFORE the
++    # LLM call. If the client retries the same POST /chat (network blip,
++    # 502, user double-click) the same message is appended to
++    # dialogue_history twice, and the next prompt to the LLM contains a
++    # duplicated user turn. A correct fix needs an idempotency key on
++    # ChatRequest (e.g. client-generated message_id) plus dedup inside
++    # add_dialogue_message; left as REVIEW because it changes the API
++    # contract.
+     add_dialogue_message(request.session_id, "user", request.message)
+ 
+     # Build conversation for LLM
+diff --git a/backend/scraper/mudah_scraper.py b/backend/scraper/mudah_scraper.py
+index 83b3b60..8726189 100644
+--- a/backend/scraper/mudah_scraper.py
++++ b/backend/scraper/mudah_scraper.py
+@@ -369,6 +369,13 @@ def _build_search_url(
+ 
+ 
+ def _extract_listing_urls(html: str) -> List[str]:
++    # REVIEW (low-risk, not auto-fixed): both _extract_listing_urls and
++    # _parse_detail (line ~585) rely on the live mudah.my DOM — CSS
++    # selectors, LISTING_HREF_RE, and the attribute names parsed out of
++    # each detail page. None of that can be statically verified from this
++    # codebase; the only guarantee is runtime + golden-fixture coverage.
++    # Treat any silent regression (empty url list, all-None fields after a
++    # successful HTTP 200) as a selector-drift signal, not a logic bug.
+     soup = BeautifulSoup(html, "html.parser")
+     urls: List[str] = []
+     seen = set()
+@@ -1117,4 +1124,4 @@ async def scrape_region_type(
+             if pending:
+                 await asyncio.gather(*pending, return_exceptions=True)
+ 
+-    return collected
+\ No newline at end of file
++    return collected
+diff --git a/backend/scraper/storage.py b/backend/scraper/storage.py
+index d961d3b..b83bed3 100644
+--- a/backend/scraper/storage.py
++++ b/backend/scraper/storage.py
+@@ -182,31 +182,51 @@ def write_tempo(region: str, session_id: str, rows: List[ScrapedProperty]) -> Pa
+     return p
+ 
+ 
+-def append_tempo(region: str, session_id: str, rows: List[ScrapedProperty]) -> int:
++def append_tempo(region: str, session_id: str, rows: List[Dict]) -> int:
++    """Append scraped dict rows into the session tempo JSON, dedup by URL.
++
++    BUG FIX: the previous implementation declared rows as List[ScrapedProperty]
++    and used attribute access (r.listing_url, r.model_dump()), but every real
++    call site (seeder._scrape_one_type_persist) passes plain dicts produced by
++    mudah_scraper._parse_detail. That raised AttributeError on the first
++    realtime success. It also read existing rows via dict.get while read_tempo
++    returned Pydantic models — that path raised AttributeError too. Treat
++    rows + existing uniformly as dicts; write_tempo already accepts both.
++    """
+     existing = read_tempo(region, session_id)
+     existing_urls = {r.get("listing_url") for r in existing if r.get("listing_url")}
+-    merged = list(existing)
++    merged: List[Dict] = list(existing)
+     added = 0
+     seen_in_batch: set = set()
+     for r in rows:
+-        url = r.listing_url  # Access directly from ScrapedProperty
++        url = r.get("listing_url") if isinstance(r, dict) else getattr(r, "listing_url", None)
+         if not url or url in existing_urls or url in seen_in_batch:
+             continue
+         seen_in_batch.add(url)
+-        merged.append(r.model_dump()) # Append dict representation
++        merged.append(r if isinstance(r, dict) else r.model_dump())
+         added += 1
+     if added:
+-        write_tempo(region, session_id, [ScrapedProperty(**r) for r in merged]) # Re-validate on write
++        write_tempo(region, session_id, merged)
+     return added
+ 
+ 
+-def read_tempo(region: str, session_id: str) -> List[ScrapedProperty]:
++def read_tempo(region: str, session_id: str) -> List[Dict]:
++    """Read the per-session tempo JSON as a list of dicts.
++
++    BUG FIX: previously returned List[ScrapedProperty]; every downstream
++    consumer (search_pipeline._row_to_property and scraper.ranking_agent
++    ._score_one) then called .get() on the items, which only exists on
++    dicts and raised AttributeError. The on-disk format is JSON dicts,
++    so returning them verbatim is both correct and 1:1 with what
++    write_tempo serialized.
++    """
+     p = tempo_path(region, session_id)
+     if not p.exists():
+         return []
+     with p.open("r", encoding="utf-8") as f:
+         data = json.load(f)
+-    return [ScrapedProperty(**r) for r in data.get("rows", [])]
++    rows = data.get("rows", []) or []
++    return [r for r in rows if isinstance(r, dict)]
+ 
+ 
+ # ─── ranked JSON (top-10 output of ranking agent) ──────────────────
+diff --git a/backend/search_pipeline.py b/backend/search_pipeline.py
+index 4b2c732..49f612c 100644
+--- a/backend/search_pipeline.py
++++ b/backend/search_pipeline.py
+@@ -190,10 +190,13 @@ async def fetch_raw_properties(
+         # Surface it on the SearchSession so the API layer (and frontend)
+         # can warn the user that the live filter is degraded.
+         if live_filter.pop("_llm_degraded", False):
+-            try:
+-                search_session.llm_filter_degraded = True
+-            except Exception:
+-                pass
++            # BUG FIX: previous code referenced an undefined `search_session`
++            # inside this function (only `session_id` is in scope). The bare
++            # except swallowed the NameError, so the degradation flag was
++            # NEVER propagated — the frontend never showed the warning toast.
++            _ss = get_search_session(session_id)
++            if _ss is not None:
++                _ss.llm_filter_degraded = True
+ 
+         async def realtime():
+             return await scraper_seeder.fetch_realtime_into_tempo(
+diff --git a/backend/topology.py b/backend/topology.py
+index 64ce3ea..347682f 100644
+--- a/backend/topology.py
++++ b/backend/topology.py
+@@ -1,8 +1,17 @@
+ """
+ 行政區拓撲圖 - 開發前凍結
+ Used for administrative district expansion in search pipeline.
++
++REVIEW (low-risk, not auto-fixed): this file is a ~1490-line hand-curated
++adjacency map. It was NOT statically audited in this pass — there is no
++schema enforced on the dict values, so a typo in a level_*_adjacent key or
++a dangling reference to a removed district will silently degrade the
++expansion result without raising. Recommend adding a one-shot validator
++(every key referenced in level_n_adjacent must exist as a top-level key)
++to scraper bootstrap to catch drift the next time this file is edited.
+ """
+ 
++
+ TOPOLOGY_GRAPH = {
+ 
+     # ════════════════════════════════════════════════════════════
+@@ -1488,4 +1497,4 @@ def get_search_districts(target_district: str, expansion_level: int) -> list[str
+         pan_urban = node.get("level_3_pan_urban")
+         return [pan_urban] if pan_urban else []
+     else:
+-        return []
+\ No newline at end of file
++        return []
+diff --git a/property-agent-ui/src/lib/api.ts b/property-agent-ui/src/lib/api.ts
+index 4a4dccb..1d92db3 100644
+--- a/property-agent-ui/src/lib/api.ts
++++ b/property-agent-ui/src/lib/api.ts
+@@ -7,6 +7,7 @@ import type {
+   InitSessionResponse,
+   NextBatchResponse,
+   Phase1Form,
++  ReasonDislikeResponse,
+   RejectAllResponse,
+   RejectSingleResponse,
+   SearchStatusResponse,
+diff --git a/property-agent-ui/src/lib/store.ts b/property-agent-ui/src/lib/store.ts
+index 89a1993..bee80fe 100644
+--- a/property-agent-ui/src/lib/store.ts
++++ b/property-agent-ui/src/lib/store.ts
+@@ -4,6 +4,7 @@ import type {
+   DialogueMessage,
+   PendingConflict,
+   Phase1Form,
++  PropertyRemark,
+   PropertyResult,
+   SearchStage,
+ } from "./types";
+@@ -146,6 +147,7 @@ interface AppStore {
+     has_more?: boolean;
+     tier3_triggered?: boolean;
+     degraded?: boolean;
++    remarks?: (PropertyRemark | null)[];
+   }) => void;
+ 
+   // Rejection
+@@ -260,15 +262,40 @@ export const useAppStore = create<AppStore>((set, get) => {
+     setSearchStage: (s) => set({ searchStage: s }),
+ 
+     ...initialResults,
+-    setResults: (data) =>
++    setResults: (data) => {
++      // FIX A (remarks pipeline): backend returns `remarks` as a list of
++      // (PropertyRemark | null) aligned 1:1 by index with `results`, but the
++      // frontend previously ignored it entirely — every card fell back to
++      // the "analysis pending" placeholder even when the LLM had produced
++      // real commentary. Merge by index here so downstream components keep
++      // reading ai_remarks/missing_features/remedy/tier off PropertyResult
++      // without needing to know about the parallel array. Prefer the
++      // remark's value when present, but never overwrite an existing
++      // PropertyResult field with null/undefined.
++      const incomingResults = data.results;
++      const merged: PropertyResult[] | undefined = incomingResults
++        ? incomingResults.map((p, i) => {
++            const rk = data.remarks?.[i];
++            if (!rk) return p;
++            return {
++              ...p,
++              tier: rk.tier ?? p.tier,
++              ai_remarks: rk.remarks ?? p.ai_remarks,
++              missing_features:
++                rk.missing_features ?? p.missing_features,
++              remedy: rk.remedy ?? p.remedy ?? null,
++            };
++          })
++        : undefined;
+       set({
+-        currentBatch: data.results ?? get().currentBatch,
++        currentBatch: merged ?? get().currentBatch,
+         batchIndex: data.batch_index ?? get().batchIndex,
+         totalAvailable: data.total_available ?? get().totalAvailable,
+         hasMore: data.has_more ?? get().hasMore,
+         tier3Triggered: data.tier3_triggered ?? get().tier3Triggered,
+         degraded: data.degraded ?? get().degraded,
+-      }),
++      });
++    },
+ 
+     rejectionCount: 0,
+     rejectedIds: [],
+diff --git a/property-agent-ui/src/lib/types.ts b/property-agent-ui/src/lib/types.ts
+index c95f2e5..3ab9c3b 100644
+--- a/property-agent-ui/src/lib/types.ts
++++ b/property-agent-ui/src/lib/types.ts
+@@ -36,12 +36,27 @@ export interface Phase1Form {
+   identity: Identity;
+   gender: Gender;
+   description: string;
+-  // Backend-only payload fields. No Phase 1 UI input today; default to "" so
+-  // the backend always receives a stable string contract.
++  // REVIEW (low-risk, not auto-fixed): the backend Phase1Data Pydantic model
++  // (backend/schemas.py:Phase1Data) does NOT declare `house_type` or
++  // `location`. Pydantic v2's default config silently drops unknown fields,
++  // so these two values are sent over the wire and immediately discarded
++  // server-side — every downstream `getattr(phase1_data, "house_type", "")`
++  // returns "". Either remove these fields from the contract or add them to
++  // Phase1Data. Left as-is to avoid changing the wire protocol.
+   house_type: string;
+   location: string;
+ }
+ 
++// Aligned 1:1 with PropertyResult by index in the same response.
++// See backend/schemas.py:PropertyRemark.
++export interface PropertyRemark {
++  property_id: string;
++  tier: "tier_1" | "tier_2";
++  remarks: string;
++  missing_features: string[];
++  remedy: string | null;
++}
++
+ // Aligned to backend DialogueMessage.role contract (user | assistant only)
+ export interface DialogueMessage {
+   role: "user" | "assistant";
+@@ -104,6 +119,10 @@ export interface SearchStatusResponse {
+   tier3_triggered?: boolean;
+   degraded?: boolean;
+   results?: PropertyResult[];
++  // Backend builds this via build_remarks_for_batch and aligns it 1:1 with
++  // `results` (same length, same index). Entries may be null when no remark
++  // was generated for that property. See backend/main.py:build_remarks_for_batch.
++  remarks?: (PropertyRemark | null)[];
+ }
+ 
+ // Distinct from SearchStatusResponse — used by POST /next_batch
+@@ -114,6 +133,8 @@ export interface NextBatchResponse {
+   tier3_triggered: boolean;
+   degraded: boolean;
+   results: PropertyResult[];
++  // Same 1:1 alignment contract as SearchStatusResponse.remarks above.
++  remarks?: (PropertyRemark | null)[];
+ }
+ 
+ export interface RejectSingleResponse {
