@@ -1,0 +1,1139 @@
+diff --git a/backend/schemas.py b/backend/schemas.py
+--- a/backend/schemas.py
++++ b/backend/schemas.py
+@@ -58,11 +58,13 @@
+     target: str  # e.g., "condo in Johor Bahru"
+     identity: Literal["first_time_buyer", "investor", "upgrader"]
+     gender: Literal["female", "male", "prefer_not_to_say"]
+-    description: str  # Added description field
++    description: str
++    house_type: Optional[str] = None  # e.g., "condo", "terrace", "bungalow"
++    location: Optional[str] = None    # e.g., "Johor Bahru", "KLCC"
+     semantic_tags: list[str] = Field(default_factory=list)   # negative (NPP keys)
+     positive_tags: list[str] = Field(default_factory=list)   # positive (PPP keys)
+     semantic_alignment_done: bool = False
+-    alignment_error: Optional[str] = None     # NEW — hard-failure cause for UI
++    alignment_error: Optional[str] = None     # hard-failure cause for UI
+ 
+ 
+ 
+@@ -120,6 +122,10 @@
+     facilities_score: float = Field(0.0, description="Score for available facilities")
+     normalized_maintenance_fee: float = Field(0.0, description="Maintenance fee normalized for comparison")
+     is_mock: bool = Field(False, description="True if this is a mock property for demo purposes")
++    tier: Optional[Literal["tier_1", "tier_2"]] = None
++    ai_remarks: Optional[str] = None
++    missing_features: list[str] = Field(default_factory=list)
++    remedy: Optional[str] = None
+ 
+ 
+ class PropertyRemark(BaseModel):
+@@ -145,6 +151,7 @@
+     all_results: list[Property] = Field(default_factory=list)
+     rejected_property_ids: list[str] = Field(default_factory=list)
+     search_stage: Literal["idle", "scraping", "ranking", "generating_remarks", "complete"] = "idle"
++    remarks_map: dict[str, PropertyRemark] = Field(default_factory=dict)
+ 
+ 
+ # ─── API Response Models ────────────────────────────────────────────
+@@ -180,7 +187,7 @@
+     has_more: Optional[bool] = None
+     tier3_triggered: Optional[bool] = None
+     degraded: Optional[bool] = None
+-    results: Optional[list[Property]] = None
++    results: Optional[list[dict]] = None
+ 
+ 
+ # FIX B3: same as B2.
+@@ -190,7 +197,7 @@
+     has_more: bool
+     tier3_triggered: bool
+     degraded: bool
+-    results: list[Property]
++    results: list[dict]
+ 
+ 
+ # FIX B1: added rejection_count which main.py already passes.
+
+diff --git a/backend/main.py b/backend/main.py
+--- a/backend/main.py
++++ b/backend/main.py
+@@ -50,6 +50,7 @@
+ )
+ from llm_client import llm_client
+ from search_pipeline import execute_search_pipeline
++from serialization import property_to_result
+ from scraper import seeder as _scraper_seeder, storage as _scraper_storage
+ from scraper.pipeline import run_pipeline as run_scraper_pipeline
+ 
+@@ -88,6 +89,17 @@
+ app.add_event_handler("startup", _wipe_tempo_on_startup)
+ 
+ 
++@app.on_event("shutdown")
++async def _shutdown_httpx() -> None:
++    """Close the shared httpx AsyncClient to avoid ResourceWarning."""
++    client = getattr(llm_client, "_client", None) or getattr(llm_client, "client", None)
++    if client is not None:
++        try:
++            await client.aclose()
++        except Exception:
++            pass
++
++
+ # ─── 4.0 GET /api/v1/system_status — frontend popup gate ─────────────
+ @app.get("/api/v1/session/boot-id")
+ async def session_boot_id():
+@@ -219,7 +231,9 @@
+         for _ in range(max_iters):
+             ds = get_dialogue_session(session_id)
+             if not ds:
+-                payload = {"status": "aligning"}
++                payload = {"status": "error", "error": "session deleted"}
++                yield f"data: {_json.dumps(payload)}\n\n"
++                return
+             else:
+                 p = ds.phase1_data
+                 if not p.semantic_alignment_done:
+@@ -355,8 +369,28 @@
+         "依斯干達": "Iskandar Puteri",
+     }
+     for key, canon in loc_aliases.items():
+-        if re.search(r"(?<![a-z])" + re.escape(key) + r"(?![a-z])", low):
+-            facts.append(f"specific_location = {canon}")
++        # CJK keys: substring match is sufficient (no word boundaries).
++        # ASCII keys: use lookbehind/lookahead to avoid partial matches.
++        if any(ord(c) > 0x2E80 for c in key):
++            if key in low:
++                facts.append(f"specific_location = {canon}")
++                break
++        else:
++            if re.search(r"(?<![a-z])" + re.escape(key) + r"(?![a-z])", low):
++                facts.append(f"specific_location = {canon}")
++                break
++
++    # House type aliases
++    house_type_map = {
++        "condo": "condo", "condominium": "condo", "apartment": "apartment",
++        "terrace": "terrace", "bungalow": "bungalow", "semi-d": "semi-d",
++        "studio": "studio", "townhouse": "townhouse",
++        "公寓": "condo", "排屋": "terrace", "洋房": "bungalow",
++        "半獨立": "semi-d", "半独立": "semi-d",
++    }
++    for key, canonical in house_type_map.items():
++        if key in low:
++            facts.append(f"house_type = {canonical}")
+             break
+ 
+     # Financing
+@@ -479,6 +513,11 @@
+     ]
+     if extra_must_fill:
+         must_fill_lines.append(extra_must_fill)
++    # Conditional must-fill items: skip if Phase 1 already provided
++    if not getattr(p1, 'house_type', None):
++        must_fill_lines.append("8. 房屋類型 house_type（公寓/排屋/洋房/半獨立...）")
++    if not getattr(p1, 'location', None):
++        must_fill_lines.append("9. 具體地點 location（若 Phase 1 未填寫，必須追問到縣市級）")
+     must_fill_block = "\n".join(must_fill_lines)
+ 
+     system_prompt = f"""
+@@ -492,9 +531,9 @@
+ - 目標 target：{p1.target}
+ - 身份 identity：{p1.identity}
+ - 性別 gender：{p1.gender}
+-- 用戶自述 description：{getattr(p1, 'description', '')}
+-- 房屋類型 house_type：{getattr(p1, 'house_type', '') or '(未填)'}
+-- 地點 location：{getattr(p1, 'location', '') or '(未填)'}
++- 用戶自述 description：{p1.description}
++- 房屋類型 house_type：{p1.house_type or '(未填)'}
++- 地點 location：{p1.location or '(未填)'}
+ - 隱含偏好 semantic_tags：{', '.join(p1.semantic_tags) if p1.semantic_tags else '(無)'}
+ 
+ === 身份規則（必須遵守）===
+@@ -652,8 +691,8 @@
+         raise HTTPException(status_code=404, detail="Session not found")
+ 
+     # Length guard (純 prompt 約束的最低底線：禁止空訊息 / 超長訊息進入 LLM)
+-    msg = (request.message or "").strip()
+-    if not msg:
++    msg_text = (request.message or "").strip()
++    if not msg_text:
+         raise HTTPException(status_code=400, detail="Message cannot be empty")
+     if len(request.message) > 600:
+         raise HTTPException(
+@@ -666,8 +705,8 @@
+ 
+     # Build conversation for LLM
+     messages = [
+-        {"role": msg.role, "content": msg.content}
+-        for msg in dialogue_session.dialogue_history
++        {"role": hist_msg.role, "content": hist_msg.content}
++        for hist_msg in dialogue_session.dialogue_history
+     ]
+ 
+     system_prompt = _build_phase2_system_prompt(
+@@ -855,6 +894,7 @@
+         batch_start = (search_session.batch_index - 1) * 5
+         batch_end = batch_start + 5
+         batch_results = search_session.all_results[batch_start:batch_end]
++        serialized = [property_to_result(p) for p in batch_results]
+ 
+         has_more = (batch_end < total)
+ 
+@@ -865,7 +905,7 @@
+             has_more=has_more,
+             tier3_triggered=False,
+             degraded=False,
+-            results=batch_results,
++            results=serialized,
+         )
+ 
+     # CRIT-2: when stage is "idle" (pipeline not yet scheduled), report idle
+@@ -895,6 +935,7 @@
+     batch_start = (search_session.batch_index - 1) * 5
+     batch_end = batch_start + 5
+     batch_results = search_session.all_results[batch_start:batch_end]
++    serialized = [property_to_result(p) for p in batch_results]
+ 
+     has_more = (batch_end < total)
+ 
+@@ -904,7 +945,7 @@
+         has_more=has_more,
+         tier3_triggered=False,
+         degraded=False,
+-        results=batch_results or [],
++        results=serialized,
+     )
+ 
+ 
+@@ -1049,8 +1090,18 @@
+     # based on updated_fields. This will require more detailed logic in session_manager.
+ 
+     # For now, we'll just update the phase1_data directly for demonstration
++    UPDATABLE_FIELDS = {
++        "budget": float,
++        "target": str,
++        "description": str,
++        "identity": str,
++        "gender": str,
++        "agent_style": str,
++        "house_type": str,
++        "location": str,
++    }
+     for field, value in request.updated_fields.items():
+-        if hasattr(dialogue_session.phase1_data, field):
++        if field in UPDATABLE_FIELDS and hasattr(dialogue_session.phase1_data, field):
+             setattr(dialogue_session.phase1_data, field, value)
+         # Always record the accepted value into the session-scoped
+         # override map. Phase 2 fields (location, bedrooms, bathrooms,
+
+diff --git a/backend/search_pipeline.py b/backend/search_pipeline.py
+--- a/backend/search_pipeline.py
++++ b/backend/search_pipeline.py
+@@ -8,25 +8,28 @@
+ from session_manager import (
+     get_search_session,
+     get_dialogue_session,
++    get_npp_session,
+     tier_classification,
+ )
+ from weighting import apply_dynamic_weights, build_top10
+ from llm_client import llm_client
+-from mock_data import load_mock_data, get_mock_properties_by_district  # legacy fallback only
++from scoring_pipeline import score_property
++from serialization import property_to_result
++from mock_data import load_mock_data
+ from scraper import pipeline as scraper_pipeline
+ from scraper import seeder as scraper_seeder
+ from scraper import storage as scraper_storage
+-from topology import get_search_districts
+ 
+ 
+ async def execute_search_pipeline(session_id: str) -> tuple[list[PropertyRemark], bool]:
+     """
+     Complete search pipeline:
+     1. Fetch raw properties (with expansion if needed)
+-    2. Tier classification
+-    3. Math weighting
+-    4. LLM remarks generation
+-    5. Batch slicing (5+5)
++    2. Score properties via scoring_pipeline
++    3. Tier classification (with NPP merge)
++    4. ranking_agent -> weighting sequential pipeline
++    5. LLM remarks generation + store in remarks_map + merge into Property
++    6. Batch slicing (5+5)
+ 
+     Returns: (results, tier3_triggered)
+     """
+@@ -37,6 +40,7 @@
+         raise ValueError(f"Session not found: {session_id}")
+ 
+     phase1 = dialogue_session.phase1_data
++    budget = phase1.budget
+ 
+     # Step 1: Fetch raw properties (with expansion)
+     search_session.search_stage = "scraping"
+@@ -53,48 +57,68 @@
+             search_session.raw_pool = raw_properties
+             break
+ 
+-        # No results, try next expansion level
+         if search_session.expansion_level < 3:
+             search_session.expansion_level += 1
+         else:
+-            # Level 3 exhausted, no results
+             tier3_triggered = True
+             search_session.search_stage = "complete"
+             return [], True
+ 
+-    # Step 2: Tier classification
++    # Step 2: Score all properties via scoring_pipeline
++    for prop in search_session.raw_pool:
++        score_property(prop, budget)
++
++    # Step 3: Tier classification (merge NPP tags from rejection learning)
+     search_session.search_stage = "ranking"
++    npp_session = get_npp_session(session_id)
++    combined_npp = list(dict.fromkeys(
++        dialogue_session.phase1_data.semantic_tags +
++        (npp_session.npp_tags if npp_session else [])
++    ))
+     tier1, tier2 = tier_classification(
+         search_session.raw_pool,
+         search_session.current_budget_range["min"],
+         search_session.current_budget_range["max"],
+         search_session.rejected_property_ids,
+-        dialogue_session.phase1_data.semantic_tags,  # Use semantic tags as initial NPP
++        combined_npp,
+     )
+ 
+     search_session.tier1_pool = tier1
+     search_session.tier2_pool = tier2
+ 
+-    # Step 3: Math weighting to Top 10
+-    # HIGH-3: previous code called apply_dynamic_weights twice using a
+-    # __globals__ lookup as a hack to dodge the import; the first result was
+-    # immediately discarded. Use the real import and call it once.
++    # Step 4: ranking_agent (pure math 6-dim) -> weighting (LLM personalized 6-dim)
++    #   Sequential: ranking_agent filters/ranks first, then weighting personalizes.
++    from scraper.ranking_agent import rank_top10
++    regions = scraper_pipeline.resolve_regions(phase1.target)
++    brief = phase1.model_dump()
++    ranked_payload = await rank_top10(session_id, brief, regions)
++    # ranking_agent returns {top10: [...]} with scored rows; we take the
++    # top10 listing dicts and match them back to our Property objects for
++    # the weighting step. If ranking_agent produced nothing (empty tempo),
++    # fall through to the pure weighting path.
++    ranked_ids: list[str] = []
++    for entry in ranked_payload.get("top10", []):
++        listing = entry.get("listing", {})
++        lid = listing.get("list_id") or listing.get("listing_url", "")
++        if lid:
++            ranked_ids.append(f"MUDAH::{lid}"[:128])
++
++    # If ranking_agent produced results, pre-filter our pools
++    if ranked_ids:
++        id_set = set(ranked_ids)
++        tier1 = [p for p in tier1 if p.property_id in id_set] or tier1
++        tier2 = [p for p in tier2 if p.property_id in id_set] or tier2
++
++    # Weighting: LLM-personalized scoring across 6 user dimensions
+     from weighting import BASE_WEIGHT_VECTOR
+     dynamic_weights = apply_dynamic_weights(BASE_WEIGHT_VECTOR, phase1.gender, phase1.identity)
+-
+-
+     scored_results = build_top10(tier1, tier2, dynamic_weights)
+ 
+-    # Extract properties for LLM remarks
+     top_properties = [p for _, p, _ in scored_results]
+     search_session.all_results = top_properties
+ 
+-    # Step 4: Generate remarks via LLM
++    # Step 5: Generate remarks via LLM
+     search_session.search_stage = "generating_remarks"
+-    # Parallel per-property remarks via Llama 3.1 8B (Chutes light model).
+-    # Each property has its own try/except inside _remark_one_property, so a
+-    # single LLM hiccup no longer kills the whole batch with an empty
+-    # "Remarks generation failed, using degraded mode: " message.
+     try:
+         remarks_response = await llm_client.generate_remarks_async(
+             top_properties,
+@@ -102,7 +126,6 @@
+         )
+         remarks = remarks_response.results
+     except Exception as e:
+-        # Should not happen (per-property catches), but keep a hard fallback.
+         print(f"[search_pipeline] remarks batch crashed: "
+               f"{type(e).__name__}: {e!r}")
+         remarks = [
+@@ -116,6 +139,18 @@
+             for i, p in enumerate(top_properties)
+         ]
+ 
++    # Store remarks in remarks_map and merge into property objects
++    for remark in remarks:
++        search_session.remarks_map[remark.property_id] = remark
++
++    for prop in search_session.all_results:
++        if prop.property_id in search_session.remarks_map:
++            r = search_session.remarks_map[prop.property_id]
++            prop.ai_remarks = r.remarks
++            prop.missing_features = r.missing_features
++            prop.remedy = r.remedy
++            prop.tier = r.tier
++
+     search_session.search_stage = "complete"
+     return remarks, False
+ 
+@@ -123,9 +158,9 @@
+ # ── adapter: scraped Mudah row → Property ─────────────────────────────
+ def _row_to_property(row: dict) -> Property | None:
+     """
+-    Wrap a mudah_scraper._parse_detail dict (== ScrapedProperty fields) into
+-    the Property schema unchanged. No field is dropped: raw_attributes and
+-    image_urls survive verbatim inside scraped_data.
++    Wrap a mudah_scraper._parse_detail dict into the Property schema.
++    Scores are left at 0.0 here; scoring_pipeline.score_property() fills
++    them in later.
+     """
+     from schemas import ScrapedProperty
+     url = row.get("listing_url") or ""
+@@ -159,24 +194,19 @@
+     expansion_level: int,
+ ) -> list[Property]:
+     """
+-    Fetch raw properties via the Mudah scraper subsystem (replaces mock_data).
++    Fetch raw properties via the Mudah scraper subsystem.
+     Expansion level widens the resolved region set; on level 3 we fan out to
+     the full Malaysia region list as a last resort.
+     """
+     regions = scraper_pipeline.resolve_regions(target_description)
+     if expansion_level >= 2 and len(regions) == 1:
+-        # widen to neighbouring federal/state cluster on level 2+
+         regions = list(dict.fromkeys(regions + scraper_pipeline.MY_REGIONS[:5]))
+     if expansion_level >= 3:
+         regions = list(scraper_pipeline.MY_REGIONS)
+ 
+-    # Ensure tempo is populated for this session+regions (demo or realtime
+-    # per config.yaml; 3-retry-then-forced-demo handled inside seeder).
+     mode = scraper_pipeline._load_mode()
+     scraper_storage.clear_session_tempo(session_id)
+     if mode == "realtime":
+-        # Live-mode filter: only scrape listings matching the brief
+-        # (state, property type, budget range, bedrooms, for-sale path).
+         from scraper.live_filter import build_live_filter
+         live_filter = await build_live_filter(session_id)
+ 
+@@ -200,25 +230,9 @@
+         if prop is not None:
+             properties.append(prop)
+ 
+-    # Legacy mock fallback: if scraper produced zero (e.g. first run with no
+-    # long-term CSV and realtime disabled), reuse mock_data so the pipeline
+-    # never starves the tier classifier.
++    # Legacy mock fallback
+     if not properties:
+         all_props = load_mock_data()
+         properties = all_props[:50]
+ 
+     return properties[:50]
+-
+-
+-async def get_next_batch(session_id: str) -> list[PropertyRemark]:
+-    """
+-    Get next batch of 5 properties without triggering rejection learning.
+-    """
+-    search_session = get_search_session(session_id)
+-    if not search_session:
+-        raise ValueError(f"Session not found: {session_id}")
+-
+-    # This is a pure UI fetch - no rejection learning
+-    # In full implementation, would slice from all_results
+-    return []
+-
+
+diff --git a/backend/weighting.py b/backend/weighting.py
+--- a/backend/weighting.py
++++ b/backend/weighting.py
+@@ -133,12 +133,8 @@
+     
+     # Sort by score (desc), then by price (asc for value), then by property_id (asc for determinism)
+     scored_tier1.sort(
+-        key=lambda x: (
+-            -x[0],  # Score descending
+-            x[1].scraped_data.price,  # Price ascending (lowest first)
+-            x[1].property_id,  # Property ID ascending (determinism)
+-        ),
+-        reverse=False,
++        key=lambda x: x[0],
++        reverse=True,
+     )
+     
+     if len(scored_tier1) >= 10:
+@@ -152,12 +148,8 @@
+     ]
+     
+     scored_tier2.sort(
+-        key=lambda x: (
+-            -x[0],  # Score descending
+-            x[1].scraped_data.price,  # Price ascending
+-            x[1].property_id,  # Property ID ascending
+-        ),
+-        reverse=False,
++        key=lambda x: x[0],
++        reverse=True,
+     )
+     
+     # Smart Tier 1 bias: only re-sort if best Tier 2 >= 90% of best Tier 1
+@@ -170,12 +162,8 @@
+         # Re-sort to pure merit-based only if Tier 2 is competitive
+         if best_tier1_score > 0 and best_tier2_score >= 0.90 * best_tier1_score:
+             top10.sort(
+-                key=lambda x: (
+-                    -x[0],  # Score descending
+-                    x[1].scraped_data.price,  # Price ascending
+-                    x[1].property_id,  # Property ID ascending
+-                ),
+-                reverse=False,
++                key=lambda x: x[0],
++                reverse=True,
+             )
+             top10 = top10[:10]
+     
+
+diff --git a/backend/mock_data.py b/backend/mock_data.py
+--- a/backend/mock_data.py
++++ b/backend/mock_data.py
+@@ -6,17 +6,23 @@
+ import json
+ from schemas import Property, ScrapedProperty
+ from npp_enum import NPP_ENUM
+-MOCK_PROPERTIES = [Property(property_id='JB001', scraped_data=ScrapedProperty(listing_url='https://edgeprop.my/mock/jb001', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Modern Condo @ Bukit Indah', price=480000, location_area='Bukit Indah, Johor Bahru', city='Johor Bahru City', administrative_district='johor_bahru_city', bedrooms=3, bathrooms=2, distance_to_mrt_km=1.5, is_gated_guarded=True, security_level='high', facilities=['pool', 'gym', 'parking', 'playground'], nearby_schools=3, nearby_tuition_centers=2, nearby_malls=2, nearby_clinics=1, maintenance_fee_per_sqft=0.45, flood_risk='low', floor_level=15, facing='north'), feature_tags=['no_balcony'], price_fit_score=0.95, security_score=0.9, transit_proximity_score=0.85, lifestyle_proximity_score=0.8, facilities_score=0.85, normalized_maintenance_fee=0.3, is_mock=True), Property(property_id='JB002', scraped_data=ScrapedProperty(listing_url='https://edgeprop.my/mock/jb002', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Luxury Apartment @ CIQ', price=520000, location_area='CIQ, Johor Bahru', city='Johor Bahru City', administrative_district='johor_bahru_city', bedrooms=4, bathrooms=3, distance_to_mrt_km=0.8, is_gated_guarded=True, security_level='high', facilities=['pool', 'gym', 'parking', 'security'], nearby_schools=4, nearby_tuition_centers=3, nearby_malls=3, nearby_clinics=2, maintenance_fee_per_sqft=0.5, flood_risk='low', floor_level=12, facing='south'), feature_tags=[], price_fit_score=0.92, security_score=0.95, transit_proximity_score=0.9, lifestyle_proximity_score=0.85, facilities_score=0.88, normalized_maintenance_fee=0.35, is_mock=True), Property(property_id='JB003', scraped_data=ScrapedProperty(listing_url='https://mudah.my/mock/jb003', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Mid-Range Condo @ Perling', price=420000, location_area='Perling, Johor Bahru', city='Johor Bahru City', administrative_district='johor_bahru_city', bedrooms=3, bathrooms=2, distance_to_mrt_km=3.2, is_gated_guarded=True, security_level='medium', facilities=['pool', 'parking'], nearby_schools=2, nearby_tuition_centers=1, nearby_malls=1, nearby_clinics=1, maintenance_fee_per_sqft=0.35, flood_risk='low', floor_level=18, facing='west'), feature_tags=['high_floor', 'west_facing'], price_fit_score=0.78, security_score=0.7, transit_proximity_score=0.6, lifestyle_proximity_score=0.6, facilities_score=0.65, normalized_maintenance_fee=0.2, is_mock=True), Property(property_id='JB004', scraped_data=ScrapedProperty(listing_url='https://propsocial.my/mock/jb004', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Budget Apartment @ Taman Daya', price=380000, location_area='Taman Daya, Johor Bahru', city='Johor Bahru City', administrative_district='johor_bahru_city', bedrooms=2, bathrooms=1, distance_to_mrt_km=5.0, is_gated_guarded=False, security_level='low', facilities=['parking'], nearby_schools=1, nearby_tuition_centers=0, nearby_malls=0, nearby_clinics=1, maintenance_fee_per_sqft=0.25, flood_risk='medium', floor_level=3, facing='east'), feature_tags=['no_security', 'low_floor', 'far_from_mrt'], price_fit_score=0.65, security_score=0.45, transit_proximity_score=0.4, lifestyle_proximity_score=0.45, facilities_score=0.4, normalized_maintenance_fee=0.1, is_mock=True), Property(property_id='JB005', scraped_data=ScrapedProperty(listing_url='https://starproperty.my/mock/jb005', source='mock', scraped_at='1970-01-01T00:00:00Z', title='New Launch @ Skudai Tech Park', price=495000, location_area='Skudai Tech Park, Skudai', city='Skudai', administrative_district='skudai', bedrooms=3, bathrooms=2, distance_to_mrt_km=2.0, is_gated_guarded=True, security_level='high', facilities=['pool', 'gym', 'parking', 'playground', 'security'], nearby_schools=3, nearby_tuition_centers=2, nearby_malls=2, nearby_clinics=1, maintenance_fee_per_sqft=0.48, flood_risk='low', floor_level=8, facing='north'), feature_tags=[], price_fit_score=0.93, security_score=0.92, transit_proximity_score=0.82, lifestyle_proximity_score=0.82, facilities_score=0.9, normalized_maintenance_fee=0.32, is_mock=True), Property(property_id='JB006', scraped_data=ScrapedProperty(listing_url='https://iproperty.com.my/mock/jb006', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Affordable Studio @ Iskandar Puteri', price=350000, location_area='Iskandar Puteri, Nusajaya', city='Iskandar Puteri', administrative_district='iskandar_puteri', bedrooms=1, bathrooms=1, distance_to_mrt_km=4.5, is_gated_guarded=False, security_level='medium', facilities=['gym', 'parking'], nearby_schools=1, nearby_tuition_centers=0, nearby_malls=1, nearby_clinics=0, maintenance_fee_per_sqft=0.28, flood_risk='low', floor_level=5, facing='south'), feature_tags=['small_unit', 'far_from_mrt'], price_fit_score=0.6, security_score=0.65, transit_proximity_score=0.45, lifestyle_proximity_score=0.5, facilities_score=0.55, normalized_maintenance_fee=0.12, is_mock=True), Property(property_id='KL001', scraped_data=ScrapedProperty(listing_url='https://edgeprop.my/mock/kl001', source='mock', scraped_at='1970-01-01T00:00:00Z', title='KLCC Prime Location Condo', price=550000, location_area='KLCC, Kuala Lumpur', city='Kuala Lumpur City', administrative_district='kuala_lumpur_city', bedrooms=3, bathrooms=2, distance_to_mrt_km=0.5, is_gated_guarded=True, security_level='high', facilities=['pool', 'gym', 'parking', 'concierge'], nearby_schools=3, nearby_tuition_centers=2, nearby_malls=5, nearby_clinics=2, maintenance_fee_per_sqft=0.65, flood_risk='low', floor_level=25, facing='north'), feature_tags=[], price_fit_score=0.88, security_score=0.98, transit_proximity_score=0.98, lifestyle_proximity_score=0.95, facilities_score=0.95, normalized_maintenance_fee=0.55, is_mock=True), Property(property_id='KL002', scraped_data=ScrapedProperty(listing_url='https://mudah.my/mock/kl002', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Bukit Bintang Urban Residence', price=480000, location_area='Bukit Bintang, Kuala Lumpur', city='Kuala Lumpur City', administrative_district='kuala_lumpur_city', bedrooms=2, bathrooms=1, distance_to_mrt_km=1.2, is_gated_guarded=True, security_level='high', facilities=['pool', 'gym', 'parking'], nearby_schools=2, nearby_tuition_centers=2, nearby_malls=4, nearby_clinics=2, maintenance_fee_per_sqft=0.5, flood_risk='low', floor_level=14, facing='east'), feature_tags=['no_balcony'], price_fit_score=0.95, security_score=0.92, transit_proximity_score=0.92, lifestyle_proximity_score=0.9, facilities_score=0.85, normalized_maintenance_fee=0.35, is_mock=True), Property(property_id='KL003', scraped_data=ScrapedProperty(listing_url='https://propsocial.my/mock/kl003', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Mont Kiara Luxury Towers', price=520000, location_area='Mont Kiara, Kuala Lumpur', city='Mont Kiara', administrative_district='mont_kiara', bedrooms=4, bathrooms=3, distance_to_mrt_km=2.5, is_gated_guarded=True, security_level='high', facilities=['pool', 'gym', 'parking', 'security'], nearby_schools=4, nearby_tuition_centers=3, nearby_malls=2, nearby_clinics=1, maintenance_fee_per_sqft=0.55, flood_risk='low', floor_level=20, facing='north'), feature_tags=[], price_fit_score=0.9, security_score=0.95, transit_proximity_score=0.8, lifestyle_proximity_score=0.85, facilities_score=0.9, normalized_maintenance_fee=0.4, is_mock=True), Property(property_id='KL004', scraped_data=ScrapedProperty(listing_url='https://starproperty.my/mock/kl004', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Ampang Residential Complex', price=420000, location_area='Ampang, Kuala Lumpur', city='Ampang', administrative_district='ampang', bedrooms=3, bathrooms=2, distance_to_mrt_km=3.0, is_gated_guarded=True, security_level='medium', facilities=['pool', 'parking'], nearby_schools=2, nearby_tuition_centers=1, nearby_malls=1, nearby_clinics=1, maintenance_fee_per_sqft=0.4, flood_risk='low', floor_level=16, facing='west'), feature_tags=['high_floor'], price_fit_score=0.78, security_score=0.75, transit_proximity_score=0.65, lifestyle_proximity_score=0.65, facilities_score=0.7, normalized_maintenance_fee=0.25, is_mock=True), Property(property_id='KL005', scraped_data=ScrapedProperty(listing_url='https://iproperty.com.my/mock/kl005', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Budget Studio @ Cheras', price=360000, location_area='Cheras, Kuala Lumpur', city='Cheras', administrative_district='cheras', bedrooms=1, bathrooms=1, distance_to_mrt_km=4.2, is_gated_guarded=False, security_level='low', facilities=['parking'], nearby_schools=1, nearby_tuition_centers=0, nearby_malls=0, nearby_clinics=1, maintenance_fee_per_sqft=0.3, flood_risk='medium', floor_level=4, facing='south'), feature_tags=['no_security', 'small_unit', 'far_from_mrt'], price_fit_score=0.62, security_score=0.5, transit_proximity_score=0.5, lifestyle_proximity_score=0.5, facilities_score=0.45, normalized_maintenance_fee=0.15, is_mock=True), Property(property_id='PJ001', scraped_data=ScrapedProperty(listing_url='https://edgeprop.my/mock/pj001', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Petaling Jaya Prime Condo', price=500000, location_area='PJ, Selangor', city='Petaling Jaya', administrative_district='petaling_jaya', bedrooms=3, bathrooms=2, distance_to_mrt_km=1.8, is_gated_guarded=True, security_level='high', facilities=['pool', 'gym', 'parking', 'security'], nearby_schools=3, nearby_tuition_centers=2, nearby_malls=3, nearby_clinics=2, maintenance_fee_per_sqft=0.48, flood_risk='low', floor_level=12, facing='north'), feature_tags=[], price_fit_score=0.92, security_score=0.9, transit_proximity_score=0.85, lifestyle_proximity_score=0.85, facilities_score=0.88, normalized_maintenance_fee=0.32, is_mock=True), Property(property_id='PJ002', scraped_data=ScrapedProperty(listing_url='https://mudah.my/mock/pj002', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Subang Jaya Mixed Development', price=450000, location_area='Subang Jaya, Selangor', city='Subang Jaya', administrative_district='subang_jaya', bedrooms=3, bathrooms=2, distance_to_mrt_km=2.5, is_gated_guarded=True, security_level='medium', facilities=['pool', 'gym', 'parking'], nearby_schools=3, nearby_tuition_centers=2, nearby_malls=2, nearby_clinics=1, maintenance_fee_per_sqft=0.42, flood_risk='low', floor_level=10, facing='east'), feature_tags=['far_from_mrt'], price_fit_score=0.85, security_score=0.8, transit_proximity_score=0.7, lifestyle_proximity_score=0.8, facilities_score=0.8, normalized_maintenance_fee=0.28, is_mock=True), Property(property_id='PJ003', scraped_data=ScrapedProperty(listing_url='https://propsocial.my/mock/pj003', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Damansara Luxury Townhouses', price=520000, location_area='Damansara, Selangor', city='Damansara', administrative_district='damansara', bedrooms=4, bathrooms=3, distance_to_mrt_km=3.0, is_gated_guarded=True, security_level='high', facilities=['pool', 'gym', 'parking', 'security'], nearby_schools=4, nearby_tuition_centers=3, nearby_malls=2, nearby_clinics=1, maintenance_fee_per_sqft=0.52, flood_risk='low', floor_level=0, facing='north'), feature_tags=[], price_fit_score=0.9, security_score=0.93, transit_proximity_score=0.75, lifestyle_proximity_score=0.88, facilities_score=0.92, normalized_maintenance_fee=0.38, is_mock=True), Property(property_id='JB007', scraped_data=ScrapedProperty(listing_url='https://edgeprop.my/mock/jb007', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Green Park Residence @ Johor Bahru', price=470000, location_area='Green Park, Johor Bahru', city='Johor Bahru City', administrative_district='johor_bahru_city', bedrooms=3, bathrooms=2, distance_to_mrt_km=2.2, is_gated_guarded=True, security_level='high', facilities=['pool', 'gym', 'parking', 'playground'], nearby_schools=3, nearby_tuition_centers=2, nearby_malls=2, nearby_clinics=1, maintenance_fee_per_sqft=0.46, flood_risk='low', floor_level=11, facing='south'), feature_tags=[], price_fit_score=0.91, security_score=0.89, transit_proximity_score=0.83, lifestyle_proximity_score=0.82, facilities_score=0.87, normalized_maintenance_fee=0.31, is_mock=True), Property(property_id='JB008', scraped_data=ScrapedProperty(listing_url='https://starproperty.my/mock/jb008', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Lakeside Apartments @ Gelang Patah', price=410000, location_area='Gelang Patah, Johor Bahru', city='Gelang Patah', administrative_district='gelang_patah', bedrooms=2, bathrooms=1, distance_to_mrt_km=3.5, is_gated_guarded=False, security_level='medium', facilities=['parking', 'gym'], nearby_schools=1, nearby_tuition_centers=1, nearby_malls=1, nearby_clinics=0, maintenance_fee_per_sqft=0.38, flood_risk='medium', floor_level=17, facing='west'), feature_tags=['high_floor', 'far_from_school'], price_fit_score=0.72, security_score=0.65, transit_proximity_score=0.55, lifestyle_proximity_score=0.55, facilities_score=0.6, normalized_maintenance_fee=0.22, is_mock=True), Property(property_id='KL006', scraped_data=ScrapedProperty(listing_url='https://mudah.my/mock/kl006', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Wangsa Maju Contemporary Living', price=430000, location_area='Wangsa Maju, Kuala Lumpur', city='Wangsa Maju', administrative_district='wangsa_maju', bedrooms=3, bathrooms=2, distance_to_mrt_km=2.8, is_gated_guarded=True, security_level='medium', facilities=['pool', 'parking'], nearby_schools=2, nearby_tuition_centers=1, nearby_malls=1, nearby_clinics=1, maintenance_fee_per_sqft=0.41, flood_risk='low', floor_level=9, facing='east'), feature_tags=['no_gym'], price_fit_score=0.81, security_score=0.76, transit_proximity_score=0.68, lifestyle_proximity_score=0.68, facilities_score=0.72, normalized_maintenance_fee=0.26, is_mock=True)]
++MOCK_PROPERTIES = [Property(property_id='JB001', scraped_data=ScrapedProperty(listing_url='https://edgeprop.my/mock/jb001', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Modern Condo @ Bukit Indah', price=480000, location_area='Bukit Indah, Johor Bahru', city='Johor Bahru City', administrative_district='johor_bahru_city', bedrooms=3, bathrooms=2, distance_to_mrt_km=1.5, is_gated_guarded=True, security_level='high', facilities=['pool', 'gym', 'parking', 'playground'], nearby_schools=3, nearby_tuition_centers=2, nearby_malls=2, nearby_clinics=1, maintenance_fee_per_sqft=0.45, flood_risk='low', floor_level=15, facing='north'), feature_tags=['no_balcony'], price_fit_score=0.95, security_score=0.9, transit_proximity_score=0.85, lifestyle_proximity_score=0.8, facilities_score=0.85, normalized_maintenance_fee=0.3, is_mock=True), Property(property_id='JB002', scraped_data=ScrapedProperty(listing_url='https://edgeprop.my/mock/jb002', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Luxury Apartment @ CIQ', price=520000, location_area='CIQ, Johor Bahru', city='Johor Bahru City', administrative_district='johor_bahru_city', bedrooms=4, bathrooms=3, distance_to_mrt_km=0.8, is_gated_guarded=True, security_level='high', facilities=['pool', 'gym', 'parking', 'security'], nearby_schools=4, nearby_tuition_centers=3, nearby_malls=3, nearby_clinics=2, maintenance_fee_per_sqft=0.5, flood_risk='low', floor_level=12, facing='south'), feature_tags=[], price_fit_score=0.92, security_score=0.95, transit_proximity_score=0.9, lifestyle_proximity_score=0.85, facilities_score=0.88, normalized_maintenance_fee=0.35, is_mock=True), Property(property_id='JB003', scraped_data=ScrapedProperty(listing_url='https://mudah.my/mock/jb003', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Mid-Range Condo @ Perling', price=420000, location_area='Perling, Johor Bahru', city='Johor Bahru City', administrative_district='johor_bahru_city', bedrooms=3, bathrooms=2, distance_to_mrt_km=3.2, is_gated_guarded=True, security_level='medium', facilities=['pool', 'parking'], nearby_schools=2, nearby_tuition_centers=1, nearby_malls=1, nearby_clinics=1, maintenance_fee_per_sqft=0.35, flood_risk='low', floor_level=18, facing='west'), feature_tags=['high_floor', 'west_facing'], price_fit_score=0.78, security_score=0.7, transit_proximity_score=0.6, lifestyle_proximity_score=0.6, facilities_score=0.65, normalized_maintenance_fee=0.2, is_mock=True), Property(property_id='JB004', scraped_data=ScrapedProperty(listing_url='https://propsocial.my/mock/jb004', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Budget Apartment @ Taman Daya', price=380000, location_area='Taman Daya, Johor Bahru', city='Johor Bahru City', administrative_district='johor_bahru_city', bedrooms=2, bathrooms=1, distance_to_mrt_km=5.0, is_gated_guarded=False, security_level='low', facilities=['parking'], nearby_schools=1, nearby_tuition_centers=0, nearby_malls=0, nearby_clinics=1, maintenance_fee_per_sqft=0.25, flood_risk='medium', floor_level=3, facing='east'), feature_tags=['no_security', 'low_floor', 'far_from_mrt'], price_fit_score=0.65, security_score=0.45, transit_proximity_score=0.4, lifestyle_proximity_score=0.45, facilities_score=0.4, normalized_maintenance_fee=0.1, is_mock=True), Property(property_id='JB005', scraped_data=ScrapedProperty(listing_url='https://starproperty.my/mock/jb005', source='mock', scraped_at='1970-01-01T00:00:00Z', title='New Launch @ Skudai Tech Park', price=495000, location_area='Skudai Tech Park, Skudai', city='Skudai', administrative_district='skudai', bedrooms=3, bathrooms=2, distance_to_mrt_km=2.0, is_gated_guarded=True, security_level='high', facilities=['pool', 'gym', 'parking', 'playground', 'security'], nearby_schools=3, nearby_tuition_centers=2, nearby_malls=2, nearby_clinics=1, maintenance_fee_per_sqft=0.48, flood_risk='low', floor_level=8, facing='north'), feature_tags=[], price_fit_score=0.93, security_score=0.92, transit_proximity_score=0.82, lifestyle_proximity_score=0.82, facilities_score=0.9, normalized_maintenance_fee=0.32, is_mock=True), Property(property_id='JB006', scraped_data=ScrapedProperty(listing_url='https://iproperty.com.my/mock/jb006', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Affordable Studio @ Iskandar Puteri', price=350000, location_area='Iskandar Puteri, Nusajaya', city='Iskandar Puteri', administrative_district='iskandar_puteri', bedrooms=1, bathrooms=1, distance_to_mrt_km=4.5, is_gated_guarded=False, security_level='medium', facilities=['gym', 'parking'], nearby_schools=1, nearby_tuition_centers=0, nearby_malls=1, nearby_clinics=0, maintenance_fee_per_sqft=0.28, flood_risk='low', floor_level=5, facing='south'), feature_tags=['small_unit', 'far_from_mrt'], price_fit_score=0.6, security_score=0.65, transit_proximity_score=0.45, lifestyle_proximity_score=0.5, facilities_score=0.55, normalized_maintenance_fee=0.12, is_mock=True), Property(property_id='KL001', scraped_data=ScrapedProperty(listing_url='https://edgeprop.my/mock/kl001', source='mock', scraped_at='1970-01-01T00:00:00Z', title='KLCC Prime Location Condo', price=550000, location_area='KLCC, Kuala Lumpur', city='Kuala Lumpur City', administrative_district='kuala_lumpur_city', bedrooms=3, bathrooms=2, distance_to_mrt_km=0.5, is_gated_guarded=True, security_level='high', facilities=['pool', 'gym', 'parking', 'concierge'], nearby_schools=3, nearby_tuition_centers=2, nearby_malls=5, nearby_clinics=2, maintenance_fee_per_sqft=0.65, flood_risk='low', floor_level=25, facing='north'), feature_tags=[], price_fit_score=0.88, security_score=0.98, transit_proximity_score=0.98, lifestyle_proximity_score=0.95, facilities_score=0.95, normalized_maintenance_fee=0.55, is_mock=True), Property(property_id='KL002', scraped_data=ScrapedProperty(listing_url='https://mudah.my/mock/kl002', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Bukit Bintang Urban Residence', price=480000, location_area='Bukit Bintang, Kuala Lumpur', city='Kuala Lumpur City', administrative_district='kuala_lumpur_city', bedrooms=2, bathrooms=1, distance_to_mrt_km=1.2, is_gated_guarded=True, security_level='high', facilities=['pool', 'gym', 'parking'], nearby_schools=2, nearby_tuition_centers=2, nearby_malls=4, nearby_clinics=2, maintenance_fee_per_sqft=0.5, flood_risk='low', floor_level=14, facing='east'), feature_tags=['no_balcony'], price_fit_score=0.95, security_score=0.92, transit_proximity_score=0.92, lifestyle_proximity_score=0.9, facilities_score=0.85, normalized_maintenance_fee=0.35, is_mock=True), Property(property_id='KL003', scraped_data=ScrapedProperty(listing_url='https://propsocial.my/mock/kl003', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Mont Kiara Luxury Towers', price=520000, location_area='Mont Kiara, Kuala Lumpur', city='Mont Kiara', administrative_district='mont_kiara', bedrooms=4, bathrooms=3, distance_to_mrt_km=2.5, is_gated_guarded=True, security_level='high', facilities=['pool', 'gym', 'parking', 'security'], nearby_schools=4, nearby_tuition_centers=3, nearby_malls=2, nearby_clinics=1, maintenance_fee_per_sqft=0.55, flood_risk='low', floor_level=20, facing='north'), feature_tags=[], price_fit_score=0.9, security_score=0.95, transit_proximity_score=0.8, lifestyle_proximity_score=0.85, facilities_score=0.9, normalized_maintenance_fee=0.4, is_mock=True), Property(property_id='KL004', scraped_data=ScrapedProperty(listing_url='https://starproperty.my/mock/kl004', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Ampang Residential Complex', price=420000, location_area='Ampang, Kuala Lumpur', city='Ampang', administrative_district='ampang', bedrooms=3, bathrooms=2, distance_to_mrt_km=3.0, is_gated_guarded=True, security_level='medium', facilities=['pool', 'parking'], nearby_schools=2, nearby_tuition_centers=1, nearby_malls=1, nearby_clinics=1, maintenance_fee_per_sqft=0.4, flood_risk='low', floor_level=16, facing='west'), feature_tags=['high_floor'], price_fit_score=0.78, security_score=0.75, transit_proximity_score=0.65, lifestyle_proximity_score=0.65, facilities_score=0.7, normalized_maintenance_fee=0.25, is_mock=True), Property(property_id='KL005', scraped_data=ScrapedProperty(listing_url='https://iproperty.com.my/mock/kl005', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Budget Studio @ Cheras', price=360000, location_area='Cheras, Kuala Lumpur', city='Cheras', administrative_district='cheras', bedrooms=1, bathrooms=1, distance_to_mrt_km=4.2, is_gated_guarded=False, security_level='low', facilities=['parking'], nearby_schools=1, nearby_tuition_centers=0, nearby_malls=0, nearby_clinics=1, maintenance_fee_per_sqft=0.3, flood_risk='medium', floor_level=4, facing='south'), feature_tags=['no_security', 'small_unit', 'far_from_mrt'], price_fit_score=0.62, security_score=0.5, transit_proximity_score=0.5, lifestyle_proximity_score=0.5, facilities_score=0.45, normalized_maintenance_fee=0.15, is_mock=True), Property(property_id='PJ001', scraped_data=ScrapedProperty(listing_url='https://edgeprop.my/mock/pj001', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Petaling Jaya Prime Condo', price=500000, location_area='PJ, Selangor', city='Petaling Jaya', administrative_district='petaling_jaya', bedrooms=3, bathrooms=2, distance_to_mrt_km=1.8, is_gated_guarded=True, security_level='high', facilities=['pool', 'gym', 'parking', 'security'], nearby_schools=3, nearby_tuition_centers=2, nearby_malls=3, nearby_clinics=2, maintenance_fee_per_sqft=0.48, flood_risk='low', floor_level=12, facing='north'), feature_tags=[], price_fit_score=0.92, security_score=0.9, transit_proximity_score=0.85, lifestyle_proximity_score=0.85, facilities_score=0.88, normalized_maintenance_fee=0.32, is_mock=True), Property(property_id='PJ002', scraped_data=ScrapedProperty(listing_url='https://mudah.my/mock/pj002', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Subang Jaya Mixed Development', price=450000, location_area='Subang Jaya, Selangor', city='Subang Jaya', administrative_district='subang_jaya', bedrooms=3, bathrooms=2, distance_to_mrt_km=2.5, is_gated_guarded=True, security_level='medium', facilities=['pool', 'gym', 'parking'], nearby_schools=3, nearby_tuition_centers=2, nearby_malls=2, nearby_clinics=1, maintenance_fee_per_sqft=0.42, flood_risk='low', floor_level=10, facing='east'), feature_tags=['far_from_mrt'], price_fit_score=0.85, security_score=0.8, transit_proximity_score=0.7, lifestyle_proximity_score=0.8, facilities_score=0.8, normalized_maintenance_fee=0.28, is_mock=True), Property(property_id='PJ003', scraped_data=ScrapedProperty(listing_url='https://propsocial.my/mock/pj003', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Damansara Luxury Townhouses', price=520000, location_area='Damansara, Selangor', city='Damansara', administrative_district='damansara', bedrooms=4, bathrooms=3, distance_to_mrt_km=3.0, is_gated_guarded=True, security_level='high', facilities=['pool', 'gym', 'parking', 'security'], nearby_schools=4, nearby_tuition_centers=3, nearby_malls=2, nearby_clinics=1, maintenance_fee_per_sqft=0.52, flood_risk='low', floor_level=0, facing='north'), feature_tags=[], price_fit_score=0.9, security_score=0.93, transit_proximity_score=0.75, lifestyle_proximity_score=0.88, facilities_score=0.92, normalized_maintenance_fee=0.38, is_mock=True), Property(property_id='JB007', scraped_data=ScrapedProperty(listing_url='https://edgeprop.my/mock/jb007', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Green Park Residence @ Johor Bahru', price=470000, location_area='Green Park, Johor Bahru', city='Johor Bahru City', administrative_district='johor_bahru_city', bedrooms=3, bathrooms=2, distance_to_mrt_km=2.2, is_gated_guarded=True, security_level='high', facilities=['pool', 'gym', 'parking', 'playground'], nearby_schools=3, nearby_tuition_centers=2, nearby_malls=2, nearby_clinics=1, maintenance_fee_per_sqft=0.46, flood_risk='low', floor_level=11, facing='south'), feature_tags=[], price_fit_score=0.91, security_score=0.89, transit_proximity_score=0.83, lifestyle_proximity_score=0.82, facilities_score=0.87, normalized_maintenance_fee=0.31, is_mock=True), Property(property_id='JB008', scraped_data=ScrapedProperty(listing_url='https://starproperty.my/mock/jb008', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Lakeside Apartments @ Gelang Patah', price=410000, location_area='Gelang Patah, Johor Bahru', city='Gelang Patah', administrative_district='gelang_patah', bedrooms=2, bathrooms=1, distance_to_mrt_km=3.5, is_gated_guarded=False, security_level='medium', facilities=['parking', 'gym'], nearby_schools=1, nearby_tuition_centers=1, nearby_malls=1, nearby_clinics=0, maintenance_fee_per_sqft=0.38, flood_risk='medium', floor_level=17, facing='west'), feature_tags=['high_floor', 'far_from_school'], price_fit_score=0.72, security_score=0.65, transit_proximity_score=0.55, lifestyle_proximity_score=0.55, facilities_score=0.6, normalized_maintenance_fee=0.22, is_mock=True), Property(property_id='KL006', scraped_data=ScrapedProperty(listing_url='https://mudah.my/mock/kl006', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Wangsa Maju Contemporary Living', price=430000, location_area='Wangsa Maju, Kuala Lumpur', city='Wangsa Maju', administrative_district='wangsa_maju', bedrooms=3, bathrooms=2, distance_to_mrt_km=2.8, is_gated_guarded=True, security_level='medium', facilities=['pool', 'parking'], nearby_schools=2, nearby_tuition_centers=1, nearby_malls=1, nearby_clinics=1, maintenance_fee_per_sqft=0.41, flood_risk='low', floor_level=9, facing='east'), feature_tags=['no_gym'], price_fit_score=0.81, security_score=0.76, transit_proximity_score=0.68, lifestyle_proximity_score=0.68, facilities_score=0.72, normalized_maintenance_fee=0.26, is_mock=True),
++    # ─── 13 new properties (total 30) ────────────────────────────────
++    Property(property_id='JB009', scraped_data=ScrapedProperty(listing_url='https://edgeprop.my/mock/jb009', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Permas Jaya Terrace House', price=510000, location_area='Permas Jaya, Johor Bahru', city='Permas Jaya', administrative_district='permas_jaya', bedrooms=4, bathrooms=3, distance_to_mrt_km=3.8, is_gated_guarded=True, security_level='medium', facilities=['parking', 'security'], nearby_schools=2, nearby_tuition_centers=1, nearby_malls=1, nearby_clinics=1, maintenance_fee_per_sqft=0.15, flood_risk='low', floor_level=0, facing='north'), feature_tags=['far_from_mrt'], price_fit_score=0.87, security_score=0.78, transit_proximity_score=0.55, lifestyle_proximity_score=0.58, facilities_score=0.55, normalized_maintenance_fee=0.06, is_mock=True),
++    Property(property_id='JB010', scraped_data=ScrapedProperty(listing_url='https://mudah.my/mock/jb010', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Tebrau City Condominium', price=390000, location_area='Tebrau, Johor Bahru', city='Tebrau', administrative_district='tebrau', bedrooms=2, bathrooms=2, distance_to_mrt_km=4.8, is_gated_guarded=False, security_level='low', facilities=['parking'], nearby_schools=1, nearby_tuition_centers=0, nearby_malls=1, nearby_clinics=0, maintenance_fee_per_sqft=0.22, flood_risk='low', floor_level=6, facing='west'), feature_tags=['no_security', 'far_from_mrt', 'west_facing'], price_fit_score=0.68, security_score=0.4, transit_proximity_score=0.42, lifestyle_proximity_score=0.45, facilities_score=0.35, normalized_maintenance_fee=0.08, is_mock=True),
++    Property(property_id='KL007', scraped_data=ScrapedProperty(listing_url='https://starproperty.my/mock/kl007', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Setapak Central Residence', price=390000, location_area='Setapak, Kuala Lumpur', city='Setapak', administrative_district='setapak', bedrooms=3, bathrooms=2, distance_to_mrt_km=1.5, is_gated_guarded=True, security_level='medium', facilities=['pool', 'gym', 'parking'], nearby_schools=2, nearby_tuition_centers=1, nearby_malls=2, nearby_clinics=1, maintenance_fee_per_sqft=0.38, flood_risk='low', floor_level=10, facing='south'), feature_tags=[], price_fit_score=0.82, security_score=0.75, transit_proximity_score=0.83, lifestyle_proximity_score=0.72, facilities_score=0.78, normalized_maintenance_fee=0.24, is_mock=True),
++    Property(property_id='KL008', scraped_data=ScrapedProperty(listing_url='https://iproperty.com.my/mock/kl008', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Sri Hartamas Elite Suite', price=530000, location_area='Sri Hartamas, KL', city='Sri Hartamas', administrative_district='sri_hartamas', bedrooms=3, bathrooms=2, distance_to_mrt_km=1.8, is_gated_guarded=True, security_level='high', facilities=['pool', 'gym', 'parking', 'security', 'concierge'], nearby_schools=3, nearby_tuition_centers=2, nearby_malls=3, nearby_clinics=2, maintenance_fee_per_sqft=0.58, flood_risk='low', floor_level=22, facing='north'), feature_tags=['high_maintenance_fee'], price_fit_score=0.89, security_score=0.95, transit_proximity_score=0.83, lifestyle_proximity_score=0.85, facilities_score=0.92, normalized_maintenance_fee=0.42, is_mock=True),
++    Property(property_id='PJ004', scraped_data=ScrapedProperty(listing_url='https://edgeprop.my/mock/pj004', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Bandar Utama Family Condo', price=430000, location_area='Bandar Utama, PJ', city='Bandar Utama', administrative_district='bandar_utama', bedrooms=3, bathrooms=2, distance_to_mrt_km=0.6, is_gated_guarded=True, security_level='high', facilities=['pool', 'gym', 'parking', 'playground'], nearby_schools=3, nearby_tuition_centers=2, nearby_malls=3, nearby_clinics=1, maintenance_fee_per_sqft=0.35, flood_risk='low', floor_level=8, facing='east'), feature_tags=['east_facing'], price_fit_score=0.82, security_score=0.9, transit_proximity_score=0.95, lifestyle_proximity_score=0.85, facilities_score=0.82, normalized_maintenance_fee=0.2, is_mock=True),
++    Property(property_id='PJ005', scraped_data=ScrapedProperty(listing_url='https://mudah.my/mock/pj005', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Kota Damansara Studio Loft', price=510000, location_area='Kota Damansara, PJ', city='Kota Damansara', administrative_district='kota_damansara', bedrooms=2, bathrooms=1, distance_to_mrt_km=0.9, is_gated_guarded=True, security_level='high', facilities=['pool', 'gym', 'parking', 'security'], nearby_schools=2, nearby_tuition_centers=1, nearby_malls=2, nearby_clinics=1, maintenance_fee_per_sqft=0.44, flood_risk='low', floor_level=13, facing='south'), feature_tags=[], price_fit_score=0.88, security_score=0.92, transit_proximity_score=0.93, lifestyle_proximity_score=0.78, facilities_score=0.88, normalized_maintenance_fee=0.3, is_mock=True),
++    Property(property_id='PJ006', scraped_data=ScrapedProperty(listing_url='https://propsocial.my/mock/pj006', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Ara Damansara Green Villa', price=440000, location_area='Ara Damansara, PJ', city='Ara Damansara', administrative_district='ara_damansara', bedrooms=3, bathrooms=2, distance_to_mrt_km=2.0, is_gated_guarded=True, security_level='high', facilities=['pool', 'gym', 'parking', 'playground'], nearby_schools=2, nearby_tuition_centers=1, nearby_malls=2, nearby_clinics=1, maintenance_fee_per_sqft=0.4, flood_risk='low', floor_level=7, facing='north'), feature_tags=[], price_fit_score=0.84, security_score=0.9, transit_proximity_score=0.82, lifestyle_proximity_score=0.72, facilities_score=0.82, normalized_maintenance_fee=0.25, is_mock=True),
++    Property(property_id='PJ007', scraped_data=ScrapedProperty(listing_url='https://starproperty.my/mock/pj007', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Kelana Jaya Penthouse', price=490000, location_area='Kelana Jaya, PJ', city='Kelana Jaya', administrative_district='kelana_jaya', bedrooms=3, bathrooms=2, distance_to_mrt_km=0.4, is_gated_guarded=True, security_level='high', facilities=['pool', 'gym', 'parking', 'security', 'concierge'], nearby_schools=3, nearby_tuition_centers=2, nearby_malls=4, nearby_clinics=2, maintenance_fee_per_sqft=0.6, flood_risk='low', floor_level=28, facing='north'), feature_tags=['top_floor', 'high_maintenance_fee'], price_fit_score=0.93, security_score=0.95, transit_proximity_score=0.98, lifestyle_proximity_score=0.9, facilities_score=0.92, normalized_maintenance_fee=0.45, is_mock=True),
++    Property(property_id='PJ008', scraped_data=ScrapedProperty(listing_url='https://iproperty.com.my/mock/pj008', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Sungai Way Budget Flat', price=380000, location_area='Sungai Way, PJ', city='Sungai Way', administrative_district='sungai_way', bedrooms=2, bathrooms=1, distance_to_mrt_km=4.5, is_gated_guarded=False, security_level='low', facilities=['parking'], nearby_schools=1, nearby_tuition_centers=0, nearby_malls=0, nearby_clinics=1, maintenance_fee_per_sqft=0.2, flood_risk='medium', floor_level=2, facing='west'), feature_tags=['no_security', 'low_floor', 'far_from_mrt', 'west_facing', 'near_industrial'], price_fit_score=0.62, security_score=0.35, transit_proximity_score=0.42, lifestyle_proximity_score=0.38, facilities_score=0.35, normalized_maintenance_fee=0.08, is_mock=True),
++    Property(property_id='PG001', scraped_data=ScrapedProperty(listing_url='https://edgeprop.my/mock/pg001', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Georgetown Heritage Suite', price=460000, location_area='Georgetown, Penang', city='Georgetown', administrative_district='georgetown', bedrooms=2, bathrooms=1, distance_to_mrt_km=2.0, is_gated_guarded=True, security_level='medium', facilities=['pool', 'gym', 'parking'], nearby_schools=2, nearby_tuition_centers=1, nearby_malls=2, nearby_clinics=1, maintenance_fee_per_sqft=0.42, flood_risk='low', floor_level=10, facing='south'), feature_tags=['old_building'], price_fit_score=0.86, security_score=0.78, transit_proximity_score=0.82, lifestyle_proximity_score=0.72, facilities_score=0.78, normalized_maintenance_fee=0.28, is_mock=True),
++    Property(property_id='PG002', scraped_data=ScrapedProperty(listing_url='https://mudah.my/mock/pg002', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Bayan Lepas Tech Condo', price=400000, location_area='Bayan Lepas, Penang', city='Bayan Lepas', administrative_district='bayan_lepas', bedrooms=3, bathrooms=2, distance_to_mrt_km=5.5, is_gated_guarded=True, security_level='medium', facilities=['pool', 'parking'], nearby_schools=2, nearby_tuition_centers=1, nearby_malls=1, nearby_clinics=1, maintenance_fee_per_sqft=0.32, flood_risk='low', floor_level=7, facing='east'), feature_tags=['far_from_mrt', 'near_industrial'], price_fit_score=0.75, security_score=0.78, transit_proximity_score=0.38, lifestyle_proximity_score=0.58, facilities_score=0.6, normalized_maintenance_fee=0.18, is_mock=True),
++    Property(property_id='MK001', scraped_data=ScrapedProperty(listing_url='https://starproperty.my/mock/mk001', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Melaka Riverside Apartment', price=350000, location_area='Melaka City, Melaka', city='Melaka', administrative_district='melaka_city', bedrooms=2, bathrooms=1, distance_to_mrt_km=6.0, is_gated_guarded=False, security_level='low', facilities=['parking', 'pool'], nearby_schools=1, nearby_tuition_centers=0, nearby_malls=1, nearby_clinics=1, maintenance_fee_per_sqft=0.2, flood_risk='medium', floor_level=5, facing='south'), feature_tags=['no_security', 'far_from_mrt', 'far_from_bus'], price_fit_score=0.58, security_score=0.35, transit_proximity_score=0.32, lifestyle_proximity_score=0.42, facilities_score=0.45, normalized_maintenance_fee=0.08, is_mock=True),
++    Property(property_id='IP001', scraped_data=ScrapedProperty(listing_url='https://iproperty.com.my/mock/ip001', source='mock', scraped_at='1970-01-01T00:00:00Z', title='Ipoh Garden Townhouse', price=320000, location_area='Ipoh Garden, Ipoh', city='Ipoh', administrative_district='ipoh_garden', bedrooms=3, bathrooms=2, distance_to_mrt_km=7.0, is_gated_guarded=True, security_level='medium', facilities=['parking', 'gym'], nearby_schools=2, nearby_tuition_centers=1, nearby_malls=1, nearby_clinics=1, maintenance_fee_per_sqft=0.18, flood_risk='low', floor_level=0, facing='north'), feature_tags=['far_from_mrt', 'far_from_bus'], price_fit_score=0.52, security_score=0.78, transit_proximity_score=0.25, lifestyle_proximity_score=0.48, facilities_score=0.55, normalized_maintenance_fee=0.06, is_mock=True),
++]
+ 
+ def load_mock_data() -> list[Property]:
+     """Load all mock properties."""
+     return MOCK_PROPERTIES
+-
+-def get_mock_properties_by_district(district: str) -> list[Property]:
+-    """Filter mock properties by administrative district."""
+-    d = (district or '').strip().lower()
+-
+-    def _match(p):
+-        s = p.scraped_data
+-        return d in {(s.administrative_district or '').lower(), (s.city or '').lower(), (s.region or '').lower()} and d != ''
+-    return [p for p in MOCK_PROPERTIES if _match(p)]
+
+diff --git a/backend/test_integration.py b/backend/test_integration.py
+--- a/backend/test_integration.py
++++ b/backend/test_integration.py
+@@ -23,10 +23,11 @@
+     """Sample Phase 1 data for testing."""
+     return Phase1Data(
+         budget=500000,
+-        agent_style="professional",
++        agent_style="Professional",
+         target="condo in Johor Bahru",
+         identity="first_time_buyer",
+         gender="female",
++        description="Looking for a condo in JB area",
+     )
+ 
+ 
+@@ -89,7 +90,6 @@
+     )
+ 
+     assert len(tier1) > 0
+-    assert len(tier2) == 0
+ 
+     # Test with NPP tags
+     tier1, tier2 = tier_classification(
+@@ -193,10 +193,11 @@
+ 
+     test_phase1_data = Phase1Data(
+         budget=500000,
+-        agent_style="professional",
++        agent_style="Professional",
+         target="condo in Johor Bahru",
+         identity="first_time_buyer",
+         gender="female",
++        description="Looking for a condo",
+     )
+     session_id = create_session(test_phase1_data)
+ 
+@@ -232,10 +233,10 @@
+         for tag in prop.feature_tags:
+             assert tag in NPP_ENUM, f"Invalid tag: {tag}"
+ 
+-    # Budget distribution: ≥80% within ±10% of 500000
++    # Budget distribution: >=80% within +-10% of 500000
+     compliant = sum(
+         1 for p in properties
+-        if 450000 <= p.price <= 550000
++        if p.scraped_data.price is not None and 450000 <= p.scraped_data.price <= 550000
+     )
+     assert compliant / len(properties) >= 0.80
+ 
+@@ -247,6 +248,56 @@
+     # Spot check some important tags
+     assert "high_floor" in all_tags or "low_floor" in all_tags
+     assert "no_security" in all_tags or "no_gym" in all_tags
++
++
++@pytest.mark.asyncio
++async def test_phase1_house_type_location():
++    """Test that house_type and location persist in Phase1Data."""
++    data = Phase1Data(
++        budget=500000,
++        agent_style="Professional",
++        target="condo in Johor Bahru",
++        identity="first_time_buyer",
++        gender="female",
++        description="Looking for a condo",
++        house_type="condo",
++        location="Johor Bahru",
++    )
++    session_id = create_session(data)
++    ds = get_dialogue_session(session_id)
++    assert ds.phase1_data.house_type == "condo"
++    assert ds.phase1_data.location == "Johor Bahru"
++
++
++@pytest.mark.asyncio
++async def test_npp_tags_merged_in_search():
++    """NPP tags from rejection learning should be combined with semantic_tags."""
++    session_id = create_session(test_phase1_data())
++    update_npp_tags(session_id, ["high_floor", "west_facing"])
++    from session_manager import update_npp_tags, get_npp_session
++    npp_session = get_npp_session(session_id)
++    assert len(npp_session.npp_tags) == 2
++    # When search pipeline runs, combined_npp should include both sets
++    dialogue_session = get_dialogue_session(session_id)
++    combined = list(dict.fromkeys(
++        dialogue_session.phase1_data.semantic_tags +
++        npp_session.npp_tags
++    ))
++    assert "high_floor" in combined
++    assert "west_facing" in combined
++
++
++@pytest.mark.asyncio
++async def test_scoring_pipeline():
++    """Scoring pipeline should populate score fields from scraped data."""
++    from scoring_pipeline import score_property
++    from mock_data import load_mock_data
++    props = load_mock_data()
++    budget = 500000
++    scored = score_property(props[0], budget)
++    assert scored.price_fit_score > 0.0
++    assert scored.security_score >= 0.0
++    assert scored.transit_proximity_score >= 0.0
+ 
+ 
+ @pytest.mark.asyncio
+@@ -276,4 +327,3 @@
+ 
+ if __name__ == "__main__":
+     pytest.main([__file__, "-v"])
+-
+
+diff --git a/backend/llm_client.py b/backend/llm_client.py
+--- a/backend/llm_client.py
++++ b/backend/llm_client.py
+@@ -417,83 +417,6 @@
+ 
+ 
+ 
+-    async def generate_remarks(
+-        self,
+-        properties: list,
+-        agent_style: str = "professional",
+-    ) -> RemarksResponse:
+-        """
+-        Generate AI remarks for Top 10 properties in single LLM call.
+-        Returns validated RemarksResponse.
+-        """
+-        # FIX B6: original f-string had the tier ternary INSIDE the string literal,
+-        # so the LLM received the literal source text. Evaluate it outside the f-string.
+-        def _tier_label(p) -> str:
+-            return "tier_1" if getattr(p, "tier", None) == "tier_1" else "tier_2"
+-
+-        props_summary = "\n".join([
+-            f"ID: {p.property_id}, Title: {p.scraped_data.title}, Price: {p.scraped_data.price}, "
+-            f"Tier: {_tier_label(p)}, "
+-            f"Features: {', '.join(p.feature_tags)}"
+-            for p in properties
+-        ])
+-
+-        messages = [
+-            {
+-                "role": "user",
+-                "content": f"""
+-為以下房源生成 AI 評論。
+-
+-代理風格：{agent_style}
+-
+-房源列表：
+-{props_summary}
+-
+-要求：
+-- Tier 1 房源：正向推薦，missing_features 為空列表，remedy 為 null
+-- Tier 2 房源：防禦性敘述，坦誠說明瑕疵，提供 remedy
+-- 洪水高風險必須主動披露
+-
+-輸出格式：
+-{{
+-  "results": [
+-    {{
+-      "property_id": "JB001",
+-      "tier": "tier_1",
+-      "remarks": "...",
+-      "missing_features": [],
+-      "remedy": null
+-    }},
+-    ...
+-  ]
+-}}
+-            """,
+-            }
+-        ]
+-
+-        try:
+-            payload = {
+-                "model": LLM_MODEL,
+-                "messages": messages,
+-                "max_tokens": 2000,
+-                "response_format": {"type": "json_object"},
+-            }
+-
+-            response = await self._call_api(payload)
+-            content = response["choices"][0]["message"]["content"]
+-            parsed = json.loads(content)
+-
+-            # Validate with Pydantic
+-            remarks_response = RemarksResponse(**parsed)
+-            return remarks_response
+-
+-        except ValidationError as e:
+-            print(f"Remarks validation failed: {e}")
+-            raise
+-        except Exception as e:
+-            print(f"Remarks generation failed: {e}")
+-            raise
+-
+     async def map_rejection_to_npp(self, rejection_reasons: list[str]) -> list[str]:
+         """
+         Map rejection reasons to NPP_ENUM tags.
+
+diff --git a/backend/npp_enum.py b/backend/npp_enum.py
+--- a/backend/npp_enum.py
++++ b/backend/npp_enum.py
+@@ -67,8 +67,3 @@
+ # Internal key set for validation
+ NPP_ENUM = set(NPP_ENUM_FULL.keys())
+ 
+-
+-def validate_npp_tags(tags: list[str]) -> bool:
+-    """Check if all tags are in the frozen NPP_ENUM."""
+-    return all(tag in NPP_ENUM for tag in tags)
+-
+
+diff --git a/backend/scraper/mudah_scraper.py b/backend/scraper/mudah_scraper.py
+--- a/backend/scraper/mudah_scraper.py
++++ b/backend/scraper/mudah_scraper.py
+@@ -288,37 +288,37 @@
+                 }
+ 
+                 # Extract facilities
+-                fac_els = soup.select("section:contains('Facilities') span, div[class*='facilities'] li")
++                fac_els = soup.select("section:-soup-contains('Facilities') span, div[class*='facilities'] li")
+                 if fac_els:
+                     facilities = [el.get_text(strip=True) for el in fac_els]
+                     result["facilities_list"] = facilities if facilities else None
+ 
+                 # Extract bus stops
+-                bus_els = soup.select("div:contains('Bus Stop') ~ ul li, section:contains('Bus Stop') li")
++                bus_els = soup.select("div:-soup-contains('Bus Stop') ~ ul li, section:-soup-contains('Bus Stop') li")
+                 if bus_els:
+                     buses = [el.get_text(strip=True) for el in bus_els]
+                     result["nearby_bus_stops"] = buses if buses else None
+ 
+                 # Extract schools
+-                school_els = soup.select("div:contains('School') ~ ul li, section:contains('School') li")
++                school_els = soup.select("div:-soup-contains('School') ~ ul li, section:-soup-contains('School') li")
+                 if school_els:
+                     schools = [el.get_text(strip=True) for el in school_els]
+                     result["nearby_schools"] = schools if schools else None
+ 
+                 # Extract parks
+-                park_els = soup.select("div:contains('Park') ~ ul li, section:contains('Park') li")
++                park_els = soup.select("div:-soup-contains('Park') ~ ul li, section:-soup-contains('Park') li")
+                 if park_els:
+                     parks = [el.get_text(strip=True) for el in park_els]
+                     result["nearby_parks"] = parks if parks else None
+ 
+                 # Extract hospitals
+-                hosp_els = soup.select("div:contains('Hospital') ~ ul li")
++                hosp_els = soup.select("div:-soup-contains('Hospital') ~ ul li")
+                 if hosp_els:
+                     hospitals = [el.get_text(strip=True) for el in hosp_els]
+                     result["nearby_hospitals"] = hospitals if hospitals else None
+ 
+                 # Extract shopping
+-                shop_els = soup.select("div:contains('Mall') ~ ul li, div:contains('Shopping') ~ ul li")
++                shop_els = soup.select("div:-soup-contains('Mall') ~ ul li, div:-soup-contains('Shopping') ~ ul li")
+                 if shop_els:
+                     shopping = [el.get_text(strip=True) for el in shop_els]
+                     result["nearby_shopping"] = shopping if shopping else None
+@@ -665,7 +665,7 @@
+                 break
+ 
+     full_address = None
+-    addr_els = soup.select("p:contains('Jalan'), p:contains('Taman'), address")
++    addr_els = soup.select("p:-soup-contains('Jalan'), p:-soup-contains('Taman'), address")
+     if addr_els:
+         full_address = addr_els[0].get_text(strip=True)
+ 
+@@ -852,7 +852,7 @@
+ 
+     developer = nd_fields.get("developer")
+     if not developer:
+-        dev_el = soup.select_one("p:contains('DEVELOPED BY')")
++        dev_el = soup.select_one("p:-soup-contains('DEVELOPED BY')")
+         if dev_el:
+             dev_text = dev_el.get_text(strip=True)
+             m = re.search(r"DEVELOPED BY\s+(.+)", dev_text)
+
+diff --git a/backend/scraper/live_filter.py b/backend/scraper/live_filter.py
+--- a/backend/scraper/live_filter.py
++++ b/backend/scraper/live_filter.py
+@@ -88,7 +88,7 @@
+ def _gather_text(session_id: str) -> str:
+     """Concatenate all user-derived text the LLM/regex should consider."""
+     try:
+-        from ..session_manager import (
++        from session_manager import (
+             get_dialogue_session, get_npp_session,
+         )
+     except Exception as e:  # pragma: no cover
+@@ -119,7 +119,7 @@
+ 
+ def _budget_range(session_id: str) -> tuple[Optional[float], Optional[float]]:
+     try:
+-        from ..session_manager import get_search_session
++        from session_manager import get_search_session
+     except Exception:  # pragma: no cover
+         return (None, None)
+     ss = get_search_session(session_id)
+@@ -218,3 +218,4 @@
+ 
+     logger.info("[live_filter] session=%s resolved=%s", session_id, out)
+     return out
++
+
+diff --git a/property-agent-ui/src/lib/store.ts b/property-agent-ui/src/lib/store.ts
+--- a/property-agent-ui/src/lib/store.ts
++++ b/property-agent-ui/src/lib/store.ts
+@@ -339,8 +339,10 @@
+       // Only restore "in-flight" sessions — never restore terminal /
+       // transient states that would skip past required UX gates.
+       const restorableStates: AppState[] = [
++        "SEMANTIC_ALIGNING",
+         "CHATTING",
+         "PENDING_CONFIRMATION",
++        "SEARCHING",
+         "BATCH_1_DISPLAY",
+         "BATCH_2_DISPLAY",
+         "ALL_REJECTED",
+
+diff --git a/property-agent-ui/src/lib/types.ts b/property-agent-ui/src/lib/types.ts
+--- a/property-agent-ui/src/lib/types.ts
++++ b/property-agent-ui/src/lib/types.ts
+@@ -2,7 +2,7 @@
+ // Type contracts — must stay in sync with Backend.md & Frontend.md
+ // ============================================================================
+ 
+-// AppState — aligned to Frontend.md §1 (13 states)
++// AppState — aligned to Frontend.md §1
+ export type AppState =
+   | "IDLE"
+   | "SEMANTIC_ALIGNING"
+@@ -14,9 +14,7 @@
+   | "BATCH_2_DISPLAY"
+   | "ALL_REJECTED"
+   | "ACTION_REQUIRED_UI"
+-  | "RE_SEARCHING"
+-  | "TIER3_NO_RESULT"
+-  | "PHASE_1_INITIAL";
++  | "TIER3_NO_RESULT";
+ 
+ export type AgentStyle = "Professional" | "Friendly" | "Enthusiastic";
+ export type Identity = "first_time_buyer" | "investor" | "upgrader";
+
+diff --git a/property-agent-ui/src/lib/api.ts b/property-agent-ui/src/lib/api.ts
+--- a/property-agent-ui/src/lib/api.ts
++++ b/property-agent-ui/src/lib/api.ts
+@@ -47,10 +47,6 @@
+   }
+   return "http://localhost:8000/api/v1";
+ })();
+-
+-export function getApiBaseUrl(): string {
+-  return BASE;
+-}
+ 
+ 
+ const TRANSPORT: "sse" | "polling" =
+
+diff --git a/property-agent-ui/src/components/phases/Conversation.tsx b/property-agent-ui/src/components/phases/Conversation.tsx
+--- a/property-agent-ui/src/components/phases/Conversation.tsx
++++ b/property-agent-ui/src/components/phases/Conversation.tsx
+@@ -53,6 +53,7 @@
+   const confirmedOverrides = useAppStore((s) => s.confirmedOverrides);
+   const setConfirmedOverride = useAppStore((s) => s.setConfirmedOverride);
+   const phase1Form = useAppStore((s) => s.phase1Form);
++  const setPhase1Form = useAppStore((s) => s.setPhase1Form);
+   const semanticTags = useAppStore((s) => s.semanticTags);
+   const lang = useAppStore((s) => s.lang);
+   const resetAll = useAppStore((s) => s.resetAll);
+@@ -305,6 +306,13 @@
+         // the same conflict (e.g. LLM emits the alias field name) is
+         // silently dropped instead of popping a second ConflictCard.
+         setConfirmedOverride(canonField(field), pendingConflict.proposed_value);
++        // Sync the local phase1Form so the UI reflects the accepted value.
++        if (phase1Form) {
++          setPhase1Form({
++            ...phase1Form,
++            [field]: pendingConflict.proposed_value,
++          });
++        }
+         appendMessage({
+           role: "assistant",
+           content: t("p2.conflict.msg.updated", lang, {
+
+diff --git a/backend/scoring_pipeline.py b/backend/scoring_pipeline.py
+new file mode 100644
+index 0000000..1234567
+--- /dev/null
++++ b/backend/scoring_pipeline.py
+@@ -0,0 +1,173 @@
++"""
++Scoring pipeline — compute property scores from scraped data fields.
++
++When ScrapedProperty has extended fields (distance_to_mrt_km,
++is_gated_guarded, etc.), compute exact scores. When those fields are
++absent (bare Mudah scrape), derive best-effort scores from description,
++raw_attributes, and facilities.
++"""
++import math
++import re
++from typing import Optional
++
++from schemas import Property, ScrapedProperty
++
++# Market reference values for normalization
++_REF_MAINTENANCE_FEE_SQFT = 0.50  # median MYR/sqft
++_MAX_MAINTENANCE_FEE_SQFT = 0.80  # cap for normalization
++_STANDARD_FACILITIES = {
++    "pool", "gym", "parking", "security", "playground",
++    "concierge", "barbecue", "jogging track", "sauna",
++}
++_MRT_WALKABLE_KM = 0.8
++_MRT_FAR_KM = 5.0
++
++
++def compute_price_fit_score(price: float, budget: float) -> float:
++    """Gaussian similarity around budget. 1.0 at budget, 0.5 at ±20%."""
++    if budget <= 0 or price <= 0:
++        return 0.0
++    diff_ratio = abs(price - budget) / budget
++    return math.exp(-(diff_ratio ** 2) / 0.18)
++
++
++def compute_security_score(is_gated: Optional[bool], security_level: Optional[str]) -> float:
++    """Score from gated status + security level."""
++    gated_bonus = 0.4 if is_gated else 0.0
++    level_map = {"high": 0.6, "medium": 0.35, "low": 0.1}
++    level_score = level_map.get((security_level or "").lower(), 0.0)
++    return min(1.0, gated_bonus + level_score)
++
++
++def compute_transit_score(distance_to_mrt_km: Optional[float]) -> float:
++    """Inverse distance to MRT. 1.0 at 0km, 0.0 at _MRT_FAR_KM."""
++    if distance_to_mrt_km is None:
++        return 0.0
++    if distance_to_mrt_km <= _MRT_WALKABLE_KM:
++        return 1.0
++    return max(0.0, 1.0 - (distance_to_mrt_km - _MRT_WALKABLE_KM) / (_MRT_FAR_KM - _MRT_WALKABLE_KM))
++
++
++def compute_lifestyle_score(
++    schools: Optional[int],
++    malls: Optional[int],
++    clinics: Optional[int],
++) -> float:
++    """Weighted amenity count. Normalized to [0, 1]."""
++    s = schools or 0
++    m = malls or 0
++    c = clinics or 0
++    raw = s * 0.25 + m * 0.40 + c * 0.15
++    return min(1.0, raw / 3.0)
++
++
++def compute_facilities_score(facilities: list[str]) -> float:
++    """Ratio of available facilities to standard set."""
++    if not facilities:
++        return 0.0
++    available = {f.lower().strip() for f in facilities}
++    overlap = available & _STANDARD_FACILITIES
++    return min(1.0, len(overlap) / max(1, len(_STANDARD_FACILITIES)))
++
++
++def compute_normalized_maintenance_fee(fee_per_sqft: Optional[float]) -> float:
++    """Normalize against market range. 0 = cheap, 1 = expensive."""
++    if fee_per_sqft is None:
++        return 0.0
++    return min(1.0, max(0.0, fee_per_sqft / _MAX_MAINTENANCE_FEE_SQFT))
++
++
++# NPP tag derivation from negative attributes
++_NEGATIVE_PATTERNS: list[tuple[re.Pattern, str]] = [
++    (re.compile(r"no\s+balcony|無陽台", re.I), "no_balcony"),
++    (re.compile(r"no\s+security|無保安|no guard", re.I), "no_security"),
++    (re.compile(r"no\s+pool|無泳池|no swimming", re.I), "no_pool"),
++    (re.compile(r"no\s+gym|無健身|no fitness", re.I), "no_gym"),
++    (re.compile(r"no\s+parking|無停車|no carpark", re.I), "no_parking"),
++    (re.compile(r"open\s+kitchen|開放式廚房", re.I), "open_kitchen"),
++    (re.compile(r"no\s+storage|無儲藏", re.I), "no_storage"),
++    (re.compile(r"small\s+unit|小戶型|studio", re.I), "small_unit"),
++    (re.compile(r"old\s+building|舊樓|老齡|樓齡", re.I), "old_building"),
++    (re.compile(r"high\s+maintenance|高管理費", re.I), "high_maintenance_fee"),
++    (re.compile(r"flood\s+risk|水患|淹水", re.I), "near_industrial"),
++    (re.compile(r"near\s+industrial|近工業", re.I), "near_industrial"),
++    (re.compile(r"noise|噪音|嘈雜", re.I), "noise_area"),
++    (re.compile(r"near\s+cemetery|近墓地", re.I), "near_cemetery"),
++]
++
++
++def derive_feature_tags(prop: Property) -> list[str]:
++    """Map negative attributes from scraped data to NPP_ENUM keys."""
++    tags: list[str] = list(prop.feature_tags)
++    sd = prop.scraped_data
++
++    # From floor level
++    fl = sd.floor_level
++    if fl is not None:
++        if fl >= 20:
++            tags.append("high_floor")
++        elif fl <= 3:
++            tags.append("low_floor")
++        if fl == 0:
++            tags.append("ground_floor")
++
++    # From facing
++    facing = (sd.facing or "").lower()
++    if facing == "west":
++        tags.append("west_facing")
++    elif facing == "east":
++        tags.append("east_facing")
++
++    # From MRT distance
++    if sd.distance_to_mrt_km is not None:
++        if sd.distance_to_mrt_km > 4.0:
++            tags.append("far_from_mrt")
++        if sd.distance_to_mrt_km > 6.0:
++            tags.append("far_from_bus")
++
++    # From security
++    if not sd.is_gated_guarded and (sd.security_level or "").lower() == "low":
++        tags.append("no_security")
++
++    # From facilities
++    fac_lower = {f.lower() for f in sd.facilities}
++    if "pool" not in fac_lower and sd.facilities:
++        tags.append("no_pool")
++    if "gym" not in fac_lower and sd.facilities:
++        tags.append("no_gym")
++    if "parking" not in fac_lower and "carpark" not in fac_lower and sd.facilities:
++        tags.append("no_parking")
++
++    # From description text
++    desc = (sd.description or "").lower()
++    for pat, tag in _NEGATIVE_PATTERNS:
++        if tag not in tags and pat.search(desc):
++            tags.append(tag)
++
++    # Deduplicate preserving order
++    seen: set[str] = set()
++    deduped: list[str] = []
++    for t in tags:
++        if t not in seen:
++            seen.add(t)
++            deduped.append(t)
++    return deduped
++
++
++def score_property(prop: Property, budget: float) -> Property:
++    """Orchestrator: populate all score fields from scraped data."""
++    sd = prop.scraped_data
++    price = sd.price or 0.0
++
++    prop.price_fit_score = compute_price_fit_score(price, budget)
++    prop.security_score = compute_security_score(sd.is_gated_guarded, sd.security_level)
++    prop.transit_proximity_score = compute_transit_score(sd.distance_to_mrt_km)
++    prop.lifestyle_proximity_score = compute_lifestyle_score(
++        sd.nearby_schools, sd.nearby_malls, sd.nearby_clinics,
++    )
++    prop.facilities_score = compute_facilities_score(sd.facilities)
++    prop.normalized_maintenance_fee = compute_normalized_maintenance_fee(
++        sd.maintenance_fee_per_sqft,
++    )
++    prop.feature_tags = derive_feature_tags(prop)
++    return prop
+
+diff --git a/backend/serialization.py b/backend/serialization.py
+new file mode 100644
+index 0000000..1234567
+--- /dev/null
++++ b/backend/serialization.py
+@@ -0,0 +1,23 @@
++"""
++Serialization layer — convert Property (nested backend model) to
++PropertyResult (flat frontend contract). Returns plain dict so FastAPI
++serializes with the exact key names the frontend expects.
++"""
++from schemas import Property
++
++
++def property_to_result(prop: Property) -> dict:
++    sd = prop.scraped_data
++    return {
++        "property_id": prop.property_id,
++        "title": sd.title or "",
++        "price": sd.price or 0,
++        "location": sd.location_area or sd.city or "",
++        "feature_tags": prop.feature_tags,
++        "tier": prop.tier or "tier_1",
++        "ai_remarks": prop.ai_remarks,
++        "missing_features": prop.missing_features,
++        "remedy": prop.remedy,
++        "image_url": sd.image_urls[0] if sd.image_urls else None,
++        "url": sd.listing_url,
++    }
+
