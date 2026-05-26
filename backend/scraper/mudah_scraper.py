@@ -32,6 +32,51 @@ USER_AGENTS = [
 LISTING_HREF_RE = re.compile(r"-\d{6,}\.htm(?:[?#]|$)")
 
 
+# ── global realtime URL budget ───────────────────────────────────────
+# Realtime mode hard-caps the number of *listing URLs* collected across
+# all regions/types in one search. Once the cap is hit, scraping stops
+# and control returns to the ranking pipeline.
+class _RealtimeBudget:
+    def __init__(self) -> None:
+        self._remaining: int = 0
+        self._lock = asyncio.Lock()
+        self._enabled: bool = False
+
+    def init(self, n: int) -> None:
+        self._remaining = max(0, int(n))
+        self._enabled = True
+
+    def disable(self) -> None:
+        self._enabled = False
+        self._remaining = 0
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    @property
+    def remaining(self) -> int:
+        return self._remaining if self._enabled else 10**9
+
+    @property
+    def exhausted(self) -> bool:
+        return self._enabled and self._remaining <= 0
+
+    async def reserve(self, want: int) -> int:
+        """Atomically reserve up to `want` slots. Returns count granted."""
+        if not self._enabled:
+            return max(0, want)
+        if want <= 0:
+            return 0
+        async with self._lock:
+            grant = min(want, self._remaining)
+            self._remaining -= grant
+            return grant
+
+
+BUDGET = _RealtimeBudget()
+
+
 def _headers() -> Dict[str, str]:
     return {
         "User-Agent": random.choice(USER_AGENTS),
@@ -378,6 +423,8 @@ async def scrape_region_type(
         for page in range(1, MAX_PAGES_PER_QUERY + 1):
             if time.monotonic() > deadline:
                 break
+            if BUDGET.exhausted:
+                break
             url = _build_search_url(region, type_key, page)
             html: Optional[str] = None
             try:
@@ -397,12 +444,19 @@ async def scrape_region_type(
             new = [u for u in urls if u not in seen_urls]
             if not new:
                 break
+            # Reserve against the global realtime URL budget.
+            grant = await BUDGET.reserve(len(new))
+            if grant <= 0:
+                break
+            new = new[:grant]
             for u in new:
                 seen_urls.add(u)
             listing_urls.extend(new)
             if on_progress:
                 await on_progress(f"{region}/{type_key} page {page}: +{len(new)} (total {len(listing_urls)})")
-            if len(listing_urls) >= target_count * 2:
+            if BUDGET.exhausted:
+                break
+            if not BUDGET.enabled and len(listing_urls) >= target_count * 2:
                 break
 
         async def fetch_one(u: str) -> Optional[Dict]:
@@ -426,15 +480,19 @@ async def scrape_region_type(
             except Exception:
                 return None
 
+        # In realtime-budget mode, fetch details for ALL reserved URLs
+        # (count was already capped by BUDGET.reserve). Otherwise keep
+        # the original target_count + 20 over-fetch slack.
+        slice_n = len(listing_urls) if BUDGET.enabled else (target_count + 20)
         tasks: List[asyncio.Task] = [
-            asyncio.create_task(fetch_one(u)) for u in listing_urls[: target_count + 20]
+            asyncio.create_task(fetch_one(u)) for u in listing_urls[:slice_n]
         ]
         try:
             for coro in asyncio.as_completed(tasks):
                 row = await coro
                 if row and row.get("listing_url"):
                     collected.append(row)
-                if len(collected) >= target_count:
+                if not BUDGET.enabled and len(collected) >= target_count:
                     break
         finally:
             pending = [t for t in tasks if not t.done()]

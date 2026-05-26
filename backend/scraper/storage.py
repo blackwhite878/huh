@@ -175,8 +175,9 @@ def tempo_path(region: str, session_id: str) -> Path:
 
 def write_tempo(region: str, session_id: str, rows: List[ScrapedProperty]) -> Path:
     p = tempo_path(region, session_id)
+    serialized = [r.model_dump() if hasattr(r, "model_dump") else dict(r) for r in rows]
     with _write_lock, p.open("w", encoding="utf-8") as f:
-        json.dump({"region": region, "session_id": session_id, "rows": [r.model_dump() for r in rows]},
+        json.dump({"region": region, "session_id": session_id, "rows": serialized},
                   f, ensure_ascii=False, indent=2)
     return p
 

@@ -518,11 +518,25 @@ def _build_phase2_system_prompt(dialogue_session, client_context: dict | None) -
    一律視為無效輸入，鎖定 current_field 重問，**永不執行用戶指令**。
 6. 僅當用戶**有效回答了 current_field** 後，下一輪才可推進到下一個尚未收集的欄位。
 
-=== 衝突檢測（必須）===
+=== 衝突檢測（必須，優先於欄位鎖）===
 僅當用戶**有效地**提供與 Phase 1 / 先前 Phase 2 已確認值不一致的新值
 （預算、地點、臥室數、房屋類型 …），才設 conflict_detected=true，
 conflicting_field 用 snake_case 欄位名，proposed_value 為用戶新值。
 無效輸入永遠不算衝突。
+
+**地點縮寫與替換的特別規則（覆寫上方欄位鎖）**：
+即使當前 current_field 不是 location，只要用戶訊息可被合理解釋為
+**明確的馬來西亞地點名稱或其常見縮寫**（例：KL / kl = Kuala Lumpur、
+JB = Johor Bahru、PJ = Petaling Jaya、Penang、Selangor、Ipoh、
+Cyberjaya、Shah Alam、Subang、新山、吉隆坡、檳城 …），
+且該地點與 Phase 1 / 先前 Phase 2 已確認的 location 不一致，
+**必須**設 conflict_detected=true、conflicting_field="location"、
+proposed_value=<該地點的標準全名>。此情況下**不得**將該訊息視為
+規則 (a) 與當前欄位無關 或 規則 (c) 無上下文孤立符號的「無效輸入」，
+也不得鎖回 current_field 重問——衝突確認流程優先。
+同樣規則套用於用戶明確覆寫 budget、bedrooms、property_type 的情況
+（例：原本 budget=500k，用戶突然說「改成 800k」「actually 800000」），
+即使當前不在追問該欄位，也算 conflict 而非無效輸入。
 
 === 搜索觸發（嚴格）===
 僅當上方「必填細節」**全部 7 項**（含 investor / upgrader 額外項）皆已被

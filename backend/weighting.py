@@ -71,9 +71,10 @@ def apply_dynamic_weights(
 
     # Strict validation
     final_sum = sum(normalized.values())
-    assert abs(final_sum - 1.0) < 1e-9, (
-        f"Normalized weights don't sum to 1.0: {final_sum}. Weights: {normalized}"
-    )
+    if abs(final_sum - 1.0) >= 1e-9:
+        raise ValueError(
+            f"Normalized weights don't sum to 1.0: {final_sum}. Weights: {normalized}"
+        )
 
     return normalized
 

@@ -27,7 +27,11 @@ from . import storage
 from .types_quota import (
     MAX_PER_REGION, MY_REGIONS, TYPE_QUOTA,
 )
-from .mudah_scraper import scrape_region_type
+from .mudah_scraper import scrape_region_type, BUDGET as _URL_BUDGET
+
+# Realtime mode hard cap: stop scraping once this many listing URLs have
+# been collected (across all regions/types) and hand off to ranking.
+REALTIME_URL_CAP = 100
 
 logger = logging.getLogger(__name__)
 
@@ -143,35 +147,56 @@ async def fetch_realtime_into_tempo(session_id: str, regions: List[str]) -> Dict
     by REGION_TYPE_CONCURRENCY). After each region we re-snapshot tempo from
     the union of (just-scraped rows ∪ pre-existing long-term CSV) so the
     ranking agent always sees the freshest data even on partial failure.
+
+    Realtime mode is capped at REALTIME_URL_CAP listing URLs total: once the
+    cap is reached, remaining regions are skipped and the ranking agent is
+    invoked on whatever has been collected so far.
     """
     counts: Dict[str, int] = {}
-    for region in regions:
-        # Initialise tempo with whatever long-term data already exists so a
-        # total scrape failure still produces a usable file.
-        pre = storage.load_longterm(region)
-        storage.write_tempo(region, session_id, pre)
+    _URL_BUDGET.init(REALTIME_URL_CAP)
+    try:
+        for region in regions:
+            if _URL_BUDGET.exhausted:
+                # Budget spent: still expose pre-existing long-term data via tempo
+                # so ranking has something to work with for the remaining regions.
+                pre = storage.load_longterm(region)
+                storage.write_tempo(region, session_id, pre)
+                counts[region] = len(pre)
+                continue
 
-        if storage.longterm_count(region) >= MAX_PER_REGION:
-            counts[region] = len(pre)
-            continue
+            # Initialise tempo with whatever long-term data already exists so a
+            # total scrape failure still produces a usable file.
+            pre = storage.load_longterm(region)
+            storage.write_tempo(region, session_id, pre)
 
-        sem = asyncio.Semaphore(REGION_TYPE_CONCURRENCY)
+            if storage.longterm_count(region) >= MAX_PER_REGION:
+                counts[region] = len(pre)
+                continue
 
-        async def _bounded(t: str, q: int) -> int:
-            async with sem:
-                return await _scrape_one_type_persist(region, session_id, t, q)
+            sem = asyncio.Semaphore(REGION_TYPE_CONCURRENCY)
 
-        results = await asyncio.gather(
-            *[_bounded(t, q) for t, q in TYPE_QUOTA.items()],
-            return_exceptions=True,
-        )
-        total_new = sum(r for r in results if isinstance(r, int))
+            async def _bounded(t: str, q: int) -> int:
+                async with sem:
+                    return await _scrape_one_type_persist(region, session_id, t, q)
 
-        # Re-snapshot tempo to the freshest union (CSV is authoritative).
-        rows = storage.load_longterm(region)
-        storage.write_tempo(region, session_id, rows)
-        counts[region] = len(rows)
-        logger.info("[realtime] %s: +%d new, total=%d", region, total_new, len(rows))
+            results = await asyncio.gather(
+                *[_bounded(t, q) for t, q in TYPE_QUOTA.items()],
+                return_exceptions=True,
+            )
+            total_new = sum(r for r in results if isinstance(r, int))
+
+            # Re-snapshot tempo to the freshest union (CSV is authoritative).
+            rows = storage.load_longterm(region)
+            storage.write_tempo(region, session_id, rows)
+            counts[region] = len(rows)
+            logger.info(
+                "[realtime] %s: +%d new, total=%d, budget_remaining=%d",
+                region, total_new, len(rows), _URL_BUDGET.remaining,
+            )
+    finally:
+        # Always disable the budget so non-realtime / subsequent runs are
+        # never accidentally throttled by leftover state.
+        _URL_BUDGET.disable()
 
     return counts
 
