@@ -1,0 +1,406 @@
+diff -urN '--exclude=__pycache__' '--exclude=.git' a/backend/main.py b/backend/main.py
+--- a/backend/main.py	2026-05-26 16:36:28.788209091 +0000
++++ b/backend/main.py	2026-05-26 16:37:33.384596099 +0000
+@@ -33,6 +33,7 @@
+     UpdateRequirementsRequest,
+     UpdateRequirementsResponse,
+ )
++from npp_enum import filter_npp_tags
+ from session_manager import (
+     create_session,
+     get_dialogue_session,
+@@ -969,7 +970,9 @@
+ 
+     # Map to NPP tags
+     try:
+-        new_npp_tags = await llm_client.map_rejection_to_npp(rejection_reasons)
++        raw_npp_tags = await llm_client.map_rejection_to_npp(rejection_reasons)
++        # Permissive validation: drop unknown enum keys, keep valid ones.
++        new_npp_tags = filter_npp_tags(raw_npp_tags)
+         update_npp_tags(request.session_id, new_npp_tags)
+     except Exception as e:
+         print(f"NPP mapping error: {e}")
+@@ -1083,29 +1086,19 @@
+ 
+ 
+ # ─── Phase-3 helpers ────────────────────────────────────────────────
+-def _remarks_for(search_session, batch_results):
++def build_remarks_for_batch(search_session, batch_results):
+     """
+     Build a list of PropertyRemark aligned 1:1 with batch_results. Missing
+     entries (LLM partial failure / pre-existing sessions without a remarks
+     map) get a deterministic placeholder so the response shape is stable.
+     """
+-    from schemas import PropertyRemark
++    # C1 strict shape: align 1:1 with batch_results by index. Missing entries
++    # are None — the frontend renders "Analysis pending" rather than the
++    # backend fabricating a placeholder string.
+     out = []
+     remarks_by_id = getattr(search_session, "remarks_by_id", {}) or {}
+     for prop in batch_results:
+-        r = remarks_by_id.get(prop.property_id)
+-        if r is None:
+-            r = PropertyRemark(
+-                property_id=prop.property_id,
+-                tier="tier_1",
+-                remarks=(
+-                    f"{prop.scraped_data.title or prop.property_id} — "
+-                    f"{prop.scraped_data.price}"
+-                ),
+-                missing_features=[],
+-                remedy=None,
+-            )
+-        out.append(r)
++        out.append(remarks_by_id.get(prop.property_id))
+     return out
+ 
+ 
+@@ -1169,7 +1162,8 @@
+             detail=f"Upstream LLM unavailable: {type(e).__name__}: {e}",
+         )
+ 
+-    add_npp = list(result.get("add_npp") or [])
++    # Permissive validation: drop unknown NPP enum keys, keep valid ones.
++    add_npp = filter_npp_tags(list(result.get("add_npp") or []))
+     add_ppp = list(result.get("add_ppp") or [])
+     remove_ppp = list(result.get("remove_ppp") or [])
+     rationale = str(result.get("rationale") or "")
+diff -urN '--exclude=__pycache__' '--exclude=.git' a/backend/npp_enum.py b/backend/npp_enum.py
+--- a/backend/npp_enum.py	2026-05-26 16:36:28.788336514 +0000
++++ b/backend/npp_enum.py	2026-05-26 16:37:33.384772859 +0000
+@@ -69,6 +69,38 @@
+ 
+ 
+ def validate_npp_tags(tags: list[str]) -> bool:
+-    """Check if all tags are in the frozen NPP_ENUM."""
++    """Check if all tags are in the frozen NPP_ENUM.
++
++    Kept for backward compatibility. Prefer ``filter_npp_tags`` which is
++    permissive and is what the API layer uses on LLM-derived tags.
++    """
+     return all(tag in NPP_ENUM for tag in tags)
+ 
++
++def filter_npp_tags(tags: list[str]) -> list[str]:
++    """Permissive validation for LLM-produced NPP tags.
++
++    Drops tags that are not in the frozen ``NPP_ENUM`` (logging each drop so
++    the prompt drift is visible in server logs) and returns the surviving
++    list. Order is preserved; duplicates collapsed. Empty / non-string entries
++    are silently dropped — they are never useful downstream.
++    """
++    import logging
++    log = logging.getLogger("npp_enum")
++    cleaned: list[str] = []
++    seen: set[str] = set()
++    for raw in tags or []:
++        if not isinstance(raw, str):
++            log.info("[npp] drop non-string tag: %r", raw)
++            continue
++        t = raw.strip()
++        if not t:
++            continue
++        if t in NPP_ENUM:
++            if t not in seen:
++                cleaned.append(t)
++                seen.add(t)
++        else:
++            log.warning("[npp] drop unknown tag: %r (not in NPP_ENUM)", t)
++    return cleaned
++
+diff -urN '--exclude=__pycache__' '--exclude=.git' a/backend/schemas.py b/backend/schemas.py
+--- a/backend/schemas.py	2026-05-26 16:36:28.788455748 +0000
++++ b/backend/schemas.py	2026-05-26 16:37:33.385070838 +0000
+@@ -189,7 +189,7 @@
+     degraded: Optional[bool] = None
+     results: Optional[list[Property]] = None
+     # Aligned 1:1 with `results` (same length, same order) when status=="complete".
+-    remarks: list[PropertyRemark] = Field(default_factory=list)
++    remarks: list[Optional[PropertyRemark]] = Field(default_factory=list)
+ 
+ 
+ # FIX B3: same as B2.
+@@ -201,7 +201,7 @@
+     degraded: bool
+     results: list[Property]
+     # Aligned 1:1 with `results` (same length, same order).
+-    remarks: list[PropertyRemark] = Field(default_factory=list)
++    remarks: list[Optional[PropertyRemark]] = Field(default_factory=list)
+ 
+ 
+ # FIX B1: added rejection_count which main.py already passes.
+diff -urN '--exclude=__pycache__' '--exclude=.git' a/backend/search_pipeline.py b/backend/search_pipeline.py
+--- a/backend/search_pipeline.py	2026-05-26 16:36:28.790546254 +0000
++++ b/backend/search_pipeline.py	2026-05-26 16:37:33.385186846 +0000
+@@ -215,6 +215,14 @@
+         if prop is not None:
+             properties.append(prop)
+ 
++    # C4 backend: in realtime mode, mock data must NEVER leak into results
++    # unless the scraper explicitly forced demo (retries exhausted). Otherwise
++    # drop is_mock rows AND skip the legacy mock fallback so empty stays empty.
++    forced_demo = bool(getattr(scraper_seeder.FLAGS, "forced_demo", False))
++    if mode == "realtime" and not forced_demo:
++        properties = [p for p in properties if not getattr(p, "is_mock", False)]
++        return properties[:50]
++
+     # Legacy mock fallback: if scraper produced zero (e.g. first run with no
+     # long-term CSV and realtime disabled), reuse mock_data so the pipeline
+     # never starves the tier classifier.
+diff -urN '--exclude=__pycache__' '--exclude=.git' a/property-agent-ui/src/components/phases/ResultsBatch.tsx b/property-agent-ui/src/components/phases/ResultsBatch.tsx
+--- a/property-agent-ui/src/components/phases/ResultsBatch.tsx	2026-05-26 16:36:28.793425587 +0000
++++ b/property-agent-ui/src/components/phases/ResultsBatch.tsx	2026-05-26 16:37:33.386283779 +0000
+@@ -20,7 +20,7 @@
+   const lang = useAppStore((s) => s.lang);
+   const appState = useAppStore((s) => s.appState);
+   const sessionId = useAppStore((s) => s.sessionId);
+-  const results = useAppStore((s) => s.currentBatch);
++  const rawResults = useAppStore((s) => s.currentBatch);
+   const hasMore = useAppStore((s) => s.hasMore);
+   const totalAvailable = useAppStore((s) => s.totalAvailable);
+   const rejectionCount = useAppStore((s) => s.rejectionCount);
+@@ -32,6 +32,13 @@
+   const addRejectedId = useAppStore((s) => s.addRejectedId);
+   const setAppState = useAppStore((s) => s.setAppState);
+ 
++  // C4 frontend defense-in-depth: if the backend ever leaks mock rows in
++  // realtime mode (not degraded), hide them. When degraded=true the backend
++  // is in forced-demo and mocks are the only thing we have — keep them.
++  const results = rawResults.filter(
++    (p) => degraded || !p.is_mock,
++  );
++
+   // C5: toast once when the LLM-augmented live filter degrades to regex-only.
+   const degradedToastedRef = useRef(false);
+   useEffect(() => {
+@@ -126,6 +133,16 @@
+         </div>
+       )}
+ 
++      {results.length === 0 && !degraded && (
++        <div className="rounded-2xl border border-dashed border-border bg-surface/40 p-10 text-center">
++          <Building2 className="mx-auto mb-3 h-8 w-8 text-muted-foreground/50" />
++          <p className="text-base font-medium">{t("results.no_results.title", lang)}</p>
++          <p className="mt-1 text-sm text-muted-foreground">
++            {t("results.no_results.body", lang)}
++          </p>
++        </div>
++      )}
++
+       <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
+         {results.map((p) => (
+           <PropertyCard
+diff -urN '--exclude=__pycache__' '--exclude=.git' a/property-agent-ui/src/lib/api.ts b/property-agent-ui/src/lib/api.ts
+--- a/property-agent-ui/src/lib/api.ts	2026-05-26 16:36:28.796998556 +0000
++++ b/property-agent-ui/src/lib/api.ts	2026-05-26 16:37:33.385652933 +0000
+@@ -3,16 +3,78 @@
+ // Defaults to fetch; ready to upgrade to SSE without changing call sites.
+ // ============================================================================
+ import type {
++  BackendProperty,
++  BackendRemark,
+   ChatResponse,
+   InitSessionResponse,
+   NextBatchResponse,
+   Phase1Form,
++  PropertyResult,
++  RawNextBatchResponse,
++  RawSearchStatusResponse,
++  ReasonDislikeResponse,
+   RejectAllResponse,
+   RejectSingleResponse,
+   SearchStatusResponse,
+   SessionReadyResponse,
+ } from "./types";
+ 
++// ─────────────────────────────────────────────────────────────────────
++// Backend → frontend adapter
++// Backend returns Property objects with a nested `scraped_data` envelope
++// plus a parallel `remarks` array (Optional[PropertyRemark], aligned by
++// index after v4 C1). The UI consumes the flat PropertyResult shape, so
++// every transport that surfaces properties must run through this mapper.
++// ─────────────────────────────────────────────────────────────────────
++function mapBackendProperty(
++  p: BackendProperty,
++  r: BackendRemark | null | undefined,
++): PropertyResult {
++  const sd = p.scraped_data ?? ({} as BackendProperty["scraped_data"]);
++  return {
++    property_id: p.property_id,
++    title: sd.title ?? "Untitled",
++    price: typeof sd.price === "number" ? sd.price : 0,
++    location: sd.location_area ?? sd.city ?? sd.region ?? "",
++    feature_tags: p.feature_tags ?? [],
++    tier: r?.tier ?? "tier_1",
++    ai_remarks: r?.remarks,
++    missing_features: r?.missing_features,
++    remedy: r?.remedy ?? undefined,
++    image_url: sd.image_urls?.[0],
++    url: sd.listing_url,
++    is_mock: p.is_mock ?? false,
++  };
++}
++
++function mapSearchStatus(raw: RawSearchStatusResponse): SearchStatusResponse {
++  const results = raw.results?.map((p, i) =>
++    mapBackendProperty(p, raw.remarks?.[i]),
++  );
++  return {
++    status: raw.status,
++    batch_index: raw.batch_index,
++    total_available: raw.total_available,
++    has_more: raw.has_more,
++    tier3_triggered: raw.tier3_triggered,
++    degraded: raw.degraded,
++    results,
++  };
++}
++
++function mapNextBatch(raw: RawNextBatchResponse): NextBatchResponse {
++  return {
++    batch_index: raw.batch_index,
++    total_available: raw.total_available,
++    has_more: raw.has_more,
++    tier3_triggered: raw.tier3_triggered,
++    degraded: raw.degraded,
++    results: (raw.results ?? []).map((p, i) =>
++      mapBackendProperty(p, raw.remarks?.[i]),
++    ),
++  };
++}
++
+ // Extra context attached to every Phase 2 chat call so the backend
+ // (and the LLM prompt it builds) can avoid re-asking known facts.
+ export interface ChatContext {
+@@ -198,11 +260,19 @@
+       ...(context ? { client_context: context } : {}),
+     }),
+ 
+-  searchStatus: (sessionId: string) =>
+-    getJSON<SearchStatusResponse>(`/search_status/${sessionId}`),
++  searchStatus: async (sessionId: string): Promise<SearchStatusResponse> => {
++    const raw = await getJSON<RawSearchStatusResponse>(
++      `/search_status/${sessionId}`,
++    );
++    return mapSearchStatus(raw);
++  },
+ 
+-  nextBatch: (sessionId: string) =>
+-    postJSON<NextBatchResponse>("/next_batch", { session_id: sessionId }),
++  nextBatch: async (sessionId: string): Promise<NextBatchResponse> => {
++    const raw = await postJSON<RawNextBatchResponse>("/next_batch", {
++      session_id: sessionId,
++    });
++    return mapNextBatch(raw);
++  },
+ 
+   rejectSingle: (sessionId: string, property_id: string, reason: string) =>
+     postJSON<RejectSingleResponse>("/reject_single", {
+@@ -330,9 +400,9 @@
+   onData: (d: SearchStatusResponse) => void,
+   onError?: (error: unknown) => void,
+ ): Stop {
+-  return sseLoop<SearchStatusResponse>(
++  return sseLoop<RawSearchStatusResponse>(
+     `/search_status/${sessionId}/stream`,
+-    onData,
++    (raw) => onData(mapSearchStatus(raw)),
+     () => pollLoop(() => api.searchStatus(sessionId), onData, onError, 3000),
+   );
+ }
+diff -urN '--exclude=__pycache__' '--exclude=.git' a/property-agent-ui/src/lib/i18n.ts b/property-agent-ui/src/lib/i18n.ts
+--- a/property-agent-ui/src/lib/i18n.ts	2026-05-26 16:36:28.797479396 +0000
++++ b/property-agent-ui/src/lib/i18n.ts	2026-05-26 16:37:33.386529963 +0000
+@@ -285,6 +285,14 @@
+     zh: "AI 分析暂时不可用",
+   },
+   "results.analysis_pending": { en: "Analysis pending.", zh: "分析生成中。" },
++  "results.no_results.title": {
++    en: "No matching properties found.",
++    zh: "未找到匹配的房源。",
++  },
++  "results.no_results.body": {
++    en: "The live scrape returned zero listings for your brief. Try widening your budget, location, or relaxing constraints in chat.",
++    zh: "实时抓取未返回符合条件的房源。可在对话中放宽预算、地区或要求后重试。",
++  },
+   "results.tradeoffs":  { en: "Trade-offs",  zh: "取舍" },
+   "results.missing":    { en: "Missing",     zh: "缺少" },
+   "results.remedy":     { en: "Remedy",      zh: "建议" },
+diff -urN '--exclude=__pycache__' '--exclude=.git' a/property-agent-ui/src/lib/types.ts b/property-agent-ui/src/lib/types.ts
+--- a/property-agent-ui/src/lib/types.ts	2026-05-26 16:36:28.797817974 +0000
++++ b/property-agent-ui/src/lib/types.ts	2026-05-26 16:37:33.385366639 +0000
+@@ -67,6 +67,34 @@
+   remedy?: string;
+   image_url?: string;
+   url?: string;
++  is_mock?: boolean;
++}
++
++// ── Backend wire types (raw shape returned by FastAPI). Kept internal to
++//    api.ts; UI code only sees the flat PropertyResult after mapping.
++export interface BackendScrapedProperty {
++  listing_url?: string;
++  title?: string | null;
++  price?: number | null;
++  location_area?: string | null;
++  city?: string | null;
++  region?: string | null;
++  image_urls?: string[];
++}
++
++export interface BackendProperty {
++  property_id: string;
++  scraped_data: BackendScrapedProperty;
++  feature_tags?: string[];
++  is_mock?: boolean;
++}
++
++export interface BackendRemark {
++  property_id: string;
++  tier: "tier_1" | "tier_2";
++  remarks: string;
++  missing_features: string[];
++  remedy?: string | null;
+ }
+ 
+ export interface InitSessionResponse {
+@@ -96,6 +124,8 @@
+   batch_index?: number;
+   total_available?: number;
+   has_more?: boolean;
++  // tier3_triggered is internal to the backend (always false in API today).
++  // Kept on the type for forward-compat but UI must not rely on it.
+   tier3_triggered?: boolean;
+   degraded?: boolean;
+   results?: PropertyResult[];
+@@ -111,6 +141,30 @@
+   results: PropertyResult[];
+ }
+ 
++// Raw wire shapes — backend returns Property objects + a parallel remarks
++// list (Optional[PropertyRemark] aligned by index after v4 C1). api.ts
++// flattens these into PropertyResult before handing to UI/store.
++export interface RawSearchStatusResponse {
++  status: SearchStage;
++  batch_index?: number;
++  total_available?: number;
++  has_more?: boolean;
++  tier3_triggered?: boolean;
++  degraded?: boolean;
++  results?: BackendProperty[];
++  remarks?: (BackendRemark | null)[];
++}
++
++export interface RawNextBatchResponse {
++  batch_index: number;
++  total_available: number;
++  has_more: boolean;
++  tier3_triggered: boolean;
++  degraded: boolean;
++  results: BackendProperty[];
++  remarks?: (BackendRemark | null)[];
++}
++
+ export interface RejectSingleResponse {
+   status: "recorded";
+   rejection_count: number;
