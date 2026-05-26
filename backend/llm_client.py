@@ -630,8 +630,30 @@ class LLMClient:
         }
 
         async with remarks_semaphore:
+            response = None
+            used_model = model
             try:
-                response = await self._call_api(payload)
+                try:
+                    response = await self._call_api(payload)
+                except httpx.HTTPStatusError as he:
+                    # Model-routing failure (slug deprecated / not deployed
+                    # on this account). Retry ONCE with the project's main
+                    # LLM_MODEL so remarks still get a real LLM pass instead
+                    # of the templated degraded fallback. Only fires when
+                    # the model we just tried is NOT already LLM_MODEL, to
+                    # avoid an infinite loop on a genuinely-bad payload.
+                    if (
+                        he.response.status_code in (400, 404)
+                        and used_model != LLM_MODEL
+                    ):
+                        print(f"[remarks] {prop.property_id} model={used_model} "
+                              f"got HTTP {he.response.status_code}; "
+                              f"retrying with LLM_MODEL={LLM_MODEL}", flush=True)
+                        used_model = LLM_MODEL
+                        retry_payload = {**payload, "model": LLM_MODEL}
+                        response = await self._call_api(retry_payload)
+                    else:
+                        raise
                 content = response["choices"][0]["message"]["content"]
                 parsed = json.loads(content)
                 return PropertyRemark(

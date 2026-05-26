@@ -28,7 +28,17 @@ RETRY_ATTEMPTS = 3
 # HTML parser used across this module. `lxml` is materially faster than
 # `html.parser` on Mudah's ~250 KB detail pages and is required for the
 # `:-soup-contains` CSS pseudo-class used in amenity extraction.
-PARSER = "lxml"
+# Fall back to the stdlib parser when lxml is unavailable so the scraper
+# degrades instead of returning silent 0-row results via bs4.FeatureNotFound.
+def _pick_parser() -> str:
+    try:
+        import lxml  # noqa: F401
+        return "lxml"
+    except ImportError:
+        return "html.parser"
+
+PARSER = _pick_parser()
+print(f"[mudah_scraper] HTML parser in use: {PARSER}", flush=True)
 
 # HTTP/2 connection limits. Shared across regions in seeder, so the pool
 # survives the whole run instead of being torn down per-region.

@@ -88,11 +88,11 @@ def _regex_bedrooms(text: str) -> Optional[int]:
 def _gather_text(session_id: str) -> str:
     """Concatenate all user-derived text the LLM/regex should consider."""
     try:
-        from ..session_manager import (
+        from session_manager import (
             get_dialogue_session, get_npp_session,
         )
     except Exception as e:  # pragma: no cover
-        logger.warning("[live_filter] session_manager import failed: %s", e)
+        logger.error("[live_filter] session_manager import failed: %s", e)
         return ""
 
     ds = get_dialogue_session(session_id)
@@ -119,7 +119,7 @@ def _gather_text(session_id: str) -> str:
 
 def _budget_range(session_id: str) -> tuple[Optional[float], Optional[float]]:
     try:
-        from ..session_manager import get_search_session
+        from session_manager import get_search_session
     except Exception:  # pragma: no cover
         return (None, None)
     ss = get_search_session(session_id)

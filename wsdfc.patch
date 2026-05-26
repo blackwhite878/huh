@@ -71,18 +71,13 @@ diff --git a/backend/scraper/live_filter.py b/backend/scraper/live_filter.py
 diff --git a/backend/scraper/mudah_scraper.py b/backend/scraper/mudah_scraper.py
 --- a/backend/scraper/mudah_scraper.py
 +++ b/backend/scraper/mudah_scraper.py
-@@ -25,10 +25,20 @@ from urllib.parse import quote_plus, urljoin
- logging.getLogger("httpx").setLevel(logging.WARNING)
- logger = logging.getLogger(__name__)
- 
--# HTML parser used across this module. `lxml` is materially faster than
-+# HTML parser used across this module. Prefer `lxml` — it is materially faster than
+@@ -28,7 +28,17 @@
+ # HTML parser used across this module. `lxml` is materially faster than
  # `html.parser` on Mudah's ~250 KB detail pages and is required for the
--# `:-soup-contains` CSS pseudo-class used in amenity extraction.
+ # `:-soup-contains` CSS pseudo-class used in amenity extraction.
 -PARSER = "lxml"
-+# `:-soup-contains` CSS pseudo-class used in amenity extraction. Fall back
-+# to the stdlib parser when lxml is unavailable so the scraper degrades
-+# instead of returning silent 0-row results via bs4.FeatureNotFound.
++# Fall back to the stdlib parser when lxml is unavailable so the scraper
++# degrades instead of returning silent 0-row results via bs4.FeatureNotFound.
 +def _pick_parser() -> str:
 +    try:
 +        import lxml  # noqa: F401
@@ -95,6 +90,8 @@ diff --git a/backend/scraper/mudah_scraper.py b/backend/scraper/mudah_scraper.py
  
  # HTTP/2 connection limits. Shared across regions in seeder, so the pool
  # survives the whole run instead of being torn down per-region.
+
+
 diff --git a/backend/llm_client.py b/backend/llm_client.py
 --- a/backend/llm_client.py
 +++ b/backend/llm_client.py
