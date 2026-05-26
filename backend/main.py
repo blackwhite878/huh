@@ -1083,29 +1083,25 @@ async def update_requirements(request: UpdateRequirementsRequest):
 
 
 # ─── Phase-3 helpers ────────────────────────────────────────────────
-def _remarks_for(search_session, batch_results):
+def build_remarks_for_batch(search_session, batch_results):
     """
-    Build a list of PropertyRemark aligned 1:1 with batch_results. Missing
-    entries (LLM partial failure / pre-existing sessions without a remarks
-    map) get a deterministic placeholder so the response shape is stable.
+    Build a list of Optional[PropertyRemark] aligned 1:1 with batch_results.
+
+    C1 plan-a (strict): missing entries (LLM partial failure / no remark
+    generated for this property_id) become `None` instead of a fabricated
+    deterministic stub. The frontend renders a "no AI commentary" state for
+    null entries so users are never shown placeholder text disguised as AI
+    output.
+
+    Also fixes a NameError: call sites in /search_status and /next_batch
+    referenced `build_remarks_for_batch`, but only `_remarks_for` existed —
+    every successful search response would have crashed at runtime.
     """
-    from schemas import PropertyRemark
-    out = []
+    from schemas import PropertyRemark  # re-exported for type clarity
+    out: list[PropertyRemark | None] = []
     remarks_by_id = getattr(search_session, "remarks_by_id", {}) or {}
     for prop in batch_results:
-        r = remarks_by_id.get(prop.property_id)
-        if r is None:
-            r = PropertyRemark(
-                property_id=prop.property_id,
-                tier="tier_1",
-                remarks=(
-                    f"{prop.scraped_data.title or prop.property_id} — "
-                    f"{prop.scraped_data.price}"
-                ),
-                missing_features=[],
-                remedy=None,
-            )
-        out.append(r)
+        out.append(remarks_by_id.get(prop.property_id))
     return out
 
 

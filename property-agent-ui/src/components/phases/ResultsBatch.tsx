@@ -99,7 +99,7 @@ export function ResultsBatch() {
           <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-border bg-surface-raised/60 px-3 py-1 font-mono text-[10px] uppercase tracking-[0.2em] text-muted-foreground backdrop-blur">
             <Sparkles className="h-3 w-3 text-primary" />
             {t("results.batch", lang)} {batchIndex || 1}
-            {t("results.batch.suffix", lang)} · {results.length} {t("results.of", lang)} {totalAvailable}
+            {t("results.batch.suffix", lang)} · {(degraded ? results : results.filter((p) => !p.is_mock)).length} {t("results.of", lang)} {totalAvailable}
           </div>
           <h2 className="text-3xl font-semibold tracking-tight md:text-4xl">
             {t("results.title.a", lang)}{" "}
@@ -127,7 +127,7 @@ export function ResultsBatch() {
       )}
 
       <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
-        {results.map((p) => (
+        {(degraded ? results : results.filter((p) => !p.is_mock)).map((p) => (
           <PropertyCard
             key={p.property_id}
             property={p}

@@ -62,11 +62,16 @@ export interface PropertyResult {
   location: string;
   feature_tags: string[];
   tier: "tier_1" | "tier_2";
-  ai_remarks?: string;
+  // C1 plan-a (strict): backend may return null when no AI commentary was
+  // generated. Treat null and undefined identically in the UI.
+  ai_remarks?: string | null;
   missing_features?: string[];
-  remedy?: string;
+  remedy?: string | null;
   image_url?: string;
   url?: string;
+  // C4: surfaced by backend Property model; true for demo/mock fixtures.
+  // Hidden by ResultsBatch when the session is not degraded / forced_demo.
+  is_mock?: boolean;
 }
 
 export interface InitSessionResponse {

@@ -189,7 +189,9 @@ class SearchStatusResponse(BaseModel):
     degraded: Optional[bool] = None
     results: Optional[list[Property]] = None
     # Aligned 1:1 with `results` (same length, same order) when status=="complete".
-    remarks: list[PropertyRemark] = Field(default_factory=list)
+    # C1 plan-a (strict): entries may be None when no remark was generated
+    # for that property. Do NOT fabricate a placeholder server-side.
+    remarks: list[Optional[PropertyRemark]] = Field(default_factory=list)
 
 
 # FIX B3: same as B2.
@@ -201,7 +203,8 @@ class NextBatchResponse(BaseModel):
     degraded: bool
     results: list[Property]
     # Aligned 1:1 with `results` (same length, same order).
-    remarks: list[PropertyRemark] = Field(default_factory=list)
+    # C1 plan-a (strict): entries may be None when no remark was generated.
+    remarks: list[Optional[PropertyRemark]] = Field(default_factory=list)
 
 
 # FIX B1: added rejection_count which main.py already passes.

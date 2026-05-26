@@ -216,10 +216,44 @@ async def fetch_raw_properties(
             properties.append(prop)
 
     # Legacy mock fallback: if scraper produced zero (e.g. first run with no
-    # long-term CSV and realtime disabled), reuse mock_data so the pipeline
-    # never starves the tier classifier.
+    # long-term CSV), reuse mock_data so the pipeline never starves the tier
+    # classifier.
+    #
+    # C4 (hide mocks in realtime): in realtime mode, mocks must NEVER leak
+    # into the user-facing result set. If we're in realtime and the scraper
+    # legitimately returned nothing (and the auto-degrade-to-demo path in
+    # seeder.run_with_retry_then_demo did not engage), return an empty list
+    # so the API layer surfaces zero_results truthfully instead of pretending
+    # we found mock fixtures.
     if not properties:
+        try:
+            mode = scraper_pipeline._load_mode()
+        except Exception:
+            mode = "demo"
+        forced_demo = False
+        try:
+            from scraper import seeder as _seeder
+            forced_demo = bool(_seeder.FLAGS.forced_demo)
+        except Exception:
+            pass
+        if mode == "realtime" and not forced_demo:
+            return []
         all_props = load_mock_data()
         properties = all_props[:50]
+
+    # Defense-in-depth: even if mock rows somehow entered `properties`
+    # (future code paths, mixed pools), strip is_mock=True in pure realtime.
+    try:
+        mode = scraper_pipeline._load_mode()
+    except Exception:
+        mode = "demo"
+    forced_demo = False
+    try:
+        from scraper import seeder as _seeder
+        forced_demo = bool(_seeder.FLAGS.forced_demo)
+    except Exception:
+        pass
+    if mode == "realtime" and not forced_demo:
+        properties = [p for p in properties if not getattr(p, "is_mock", False)]
 
     return properties[:50]
