@@ -20,4 +20,7 @@ asyncio
 aiohttp
 pytest
 npm
+playwright
+chromium
+node.js
 

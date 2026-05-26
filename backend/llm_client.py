@@ -54,8 +54,8 @@ llm_semaphore = asyncio.Semaphore(LLM_CONCURRENCY)
 # Defaults follow the user's spec:
 #   remarks   → light Llama 3.1 8B on Chutes
 #   reasoning → Qwen (dislike analysis)
-REMARKS_MODEL: str = os.getenv("REMARKS_MODEL", "chutesai/Llama-3.1-8B-Instruct")
-REASONING_MODEL: str = os.getenv("REASONING_MODEL", "Qwen/Qwen2.5-7B-Instruct")
+REMARKS_MODEL: str = os.getenv("REMARKS_MODEL", "Qwen/Qwen2.5-Coder-32B-Instruct-TEE")
+REASONING_MODEL: str = os.getenv("REASONING_MODEL", "Qwen/Qwen3-235B-A22B-Thinking-2507")
 REMARKS_MAX_TOKENS: int = int(os.getenv("REMARKS_MAX_TOKENS", "512"))
 REMARKS_CONCURRENCY: int = int(os.getenv("REMARKS_CONCURRENCY", "8"))
 print(f"[llm_client] REMARKS_MODEL={REMARKS_MODEL} REASONING_MODEL={REASONING_MODEL} "

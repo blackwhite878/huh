@@ -23,11 +23,17 @@ import asyncio
 import logging
 from typing import Awaitable, Callable, Dict, List, Optional
 
+import httpx
+
 from . import storage
 from .types_quota import (
     MAX_PER_REGION, MY_REGIONS, TYPE_QUOTA,
 )
-from .mudah_scraper import scrape_region_type, BUDGET as _URL_BUDGET
+from .mudah_scraper import (
+    scrape_region_type,
+    make_shared_client,
+    BUDGET as _URL_BUDGET,
+)
 
 # Realtime mode hard cap: stop scraping once this many listing URLs have
 # been collected (across all regions/types) and hand off to ranking.
@@ -38,7 +44,8 @@ logger = logging.getLogger(__name__)
 # Per-region type concurrency: how many (type) scrapes for a single region we
 # run in parallel. Each scrape_region_type call already has its own per-host
 # semaphore, so this is an outer fan-out cap.
-REGION_TYPE_CONCURRENCY = 3
+# v3: 3 → 6 (2× per concurrency-bump spec).
+REGION_TYPE_CONCURRENCY = 6
 
 
 # ── global degradation flag (module-level singleton) ──────────────────
@@ -134,16 +141,19 @@ async def _scrape_one_type_persist(
     quota: int,
     *,
     filters: Optional[Dict] = None,
+    client: Optional[httpx.AsyncClient] = None,
 ) -> int:
     """Scrape one type, persist into long-term CSV AND session tempo. Returns rows scraped.
 
-    When `filters` is supplied (live mode), it is forwarded to scrape_region_type
-    so that the Mudah URL carries min_price/max_price/bedrooms and the keyword
-    override. Filters do NOT alter persistence semantics (long-term CSV is still
-    append-only and authoritative).
+    `client` (optional) is the shared httpx.AsyncClient owned by the caller
+    (run-wide). When provided, scrape_region_type reuses its connection pool
+    instead of opening a fresh one per (region, type) — the dominant TCP+TLS
+    handshake cost is paid once for the whole run.
     """
     try:
-        rows = await scrape_region_type(region, type_key, quota, filters=filters)
+        rows = await scrape_region_type(
+            region, type_key, quota, filters=filters, client=client,
+        )
     except Exception as e:
         logger.warning("[realtime] %s/%s scrape raised: %r", region, type_key, e)
         return 0
@@ -192,6 +202,10 @@ async def fetch_realtime_into_tempo(
     else:
         type_plan = list(TYPE_QUOTA.items())
 
+    # Single httpx.AsyncClient shared across every (region, type) scrape so
+    # the HTTP/2 connection pool, DNS cache, and TLS session survive the
+    # whole realtime run instead of being torn down per-region.
+    shared_client = make_shared_client()
     try:
         for region in regions:
             if _URL_BUDGET.exhausted:
@@ -222,7 +236,8 @@ async def fetch_realtime_into_tempo(
                 # classic late-binding bug when `region` rebinds on next iter.
                 async with sem:
                     return await _scrape_one_type_persist(
-                        _region, session_id, t, q, filters=live_filter,
+                        _region, session_id, t, q,
+                        filters=live_filter, client=shared_client,
                     )
 
             results = await asyncio.gather(
@@ -243,6 +258,10 @@ async def fetch_realtime_into_tempo(
         # Always disable the budget so non-realtime / subsequent runs are
         # never accidentally throttled by leftover state.
         _URL_BUDGET.disable()
+        try:
+            await shared_client.aclose()
+        except Exception:
+            pass
 
     return counts
 
@@ -252,17 +271,24 @@ async def fetch_pure_into_longterm(
     regions: Optional[List[str]] = None,
     *,
     per_region_concurrency: int = REGION_TYPE_CONCURRENCY,
-    region_concurrency: int = 2,
+    region_concurrency: int = 4,
 ) -> Dict[str, Dict[str, int]]:
     """Pure-fetch mode: scrape every (region, type) combination, skipping
-    Playwright augmentation for speed (~5–10× faster than realtime), and
-    append results to the long-term CSV only. No session tempo, no ranking.
+    Playwright augmentation for speed, and append results to the long-term
+    CSV only. No session tempo, no ranking.
 
-    `region_concurrency` controls how many regions are scraped in parallel.
-    Within a region, `per_region_concurrency` types run in parallel. The
-    global realtime URL BUDGET is explicitly disabled so this mode is
-    unbounded by per-session caps; only MAX_PER_REGION × MAX_PAGES_PER_QUERY
-    and the per-region wall-clock GLOBAL_DEADLINE_SEC apply.
+    v3 optimisations:
+      - region_concurrency 2 → 4 (2× per spec).
+      - per_region_concurrency 3 → 6 (from REGION_TYPE_CONCURRENCY bump).
+      - ONE httpx.AsyncClient (HTTP/2 + keepalive) is shared across every
+        (region, type) scrape — previously each call paid a cold TCP+TLS
+        handshake. Run-wide RPS roughly doubles on warm connections.
+      - CSV writes are BUFFERED per region and flushed ONCE at end-of-region
+        instead of once per (region, type). `append_longterm` rewrites the
+        entire CSV each call (pandas merge for schema-union safety); the old
+        code paid that O(N) rewrite TYPE_QUOTA× per region. Now: 1× per
+        region. On a full Malaysia run this drops storage cost from ~O(R·T·N)
+        to ~O(R·N).
     """
     from .mudah_scraper import scrape_region_type as _scrape, BUDGET as _BUDGET
     _BUDGET.disable()
@@ -270,11 +296,15 @@ async def fetch_pure_into_longterm(
     regions = regions or list(MY_REGIONS)
     counts: Dict[str, Dict[str, int]] = {}
     region_sem = asyncio.Semaphore(max(1, region_concurrency))
+    shared_client = make_shared_client()
 
     async def _do_region(region: str) -> None:
         async with region_sem:
             type_sem = asyncio.Semaphore(max(1, per_region_concurrency))
             per_type: Dict[str, int] = {}
+            # Per-region in-memory buffer; flushed once below.
+            region_buffer: List[Dict] = []
+            buf_lock = asyncio.Lock()
 
             async def _do_type(type_key: str, quota: int) -> None:
                 async with type_sem:
@@ -282,26 +312,43 @@ async def fetch_pure_into_longterm(
                         rows = await _scrape(
                             region, type_key, quota,
                             filters=None, skip_playwright=True,
+                            client=shared_client,
                         )
                     except Exception as e:
                         logger.warning("[pure_fetch] %s/%s scrape raised: %r",
                                        region, type_key, e)
                         rows = []
-                    written = storage.append_longterm(region, rows) if rows else 0
-                    per_type[type_key] = written
-                    logger.info("[pure_fetch] %s/%s scraped=%d written=%d",
-                                region, type_key, len(rows), written)
+                    # Buffer instead of writing now. asyncio.Lock guards the
+                    # list against concurrent extends from sibling _do_type
+                    # tasks within the same region.
+                    if rows:
+                        async with buf_lock:
+                            region_buffer.extend(rows)
+                    per_type[type_key] = len(rows)
+                    logger.info("[pure_fetch] %s/%s scraped=%d (buffered)",
+                                region, type_key, len(rows))
 
             await asyncio.gather(
                 *[_do_type(t, q) for t, q in TYPE_QUOTA.items()],
                 return_exceptions=True,
             )
+
+            # Per-region flush: ONE CSV rewrite for the whole region.
+            written_total = storage.append_longterm(region, region_buffer) if region_buffer else 0
             counts[region] = per_type
             total_now = storage.longterm_count(region)
-            logger.info("[pure_fetch] %s done: per_type=%s longterm_total=%d",
-                        region, per_type, total_now)
+            logger.info(
+                "[pure_fetch] %s flush: buffered=%d written=%d longterm_total=%d per_type=%s",
+                region, len(region_buffer), written_total, total_now, per_type,
+            )
 
-    await asyncio.gather(*[_do_region(r) for r in regions], return_exceptions=True)
+    try:
+        await asyncio.gather(*[_do_region(r) for r in regions], return_exceptions=True)
+    finally:
+        try:
+            await shared_client.aclose()
+        except Exception:
+            pass
     return counts
 
 
