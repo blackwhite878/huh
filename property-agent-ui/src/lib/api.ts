@@ -7,6 +7,7 @@ import type {
   InitSessionResponse,
   NextBatchResponse,
   Phase1Form,
+  ReasonDislikeResponse,
   RejectAllResponse,
   RejectSingleResponse,
   SearchStatusResponse,

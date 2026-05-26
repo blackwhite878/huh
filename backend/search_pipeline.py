@@ -190,10 +190,13 @@ async def fetch_raw_properties(
         # Surface it on the SearchSession so the API layer (and frontend)
         # can warn the user that the live filter is degraded.
         if live_filter.pop("_llm_degraded", False):
-            try:
-                search_session.llm_filter_degraded = True
-            except Exception:
-                pass
+            # BUG FIX: previous code referenced an undefined `search_session`
+            # inside this function (only `session_id` is in scope). The bare
+            # except swallowed the NameError, so the degradation flag was
+            # NEVER propagated — the frontend never showed the warning toast.
+            _ss = get_search_session(session_id)
+            if _ss is not None:
+                _ss.llm_filter_degraded = True
 
         async def realtime():
             return await scraper_seeder.fetch_realtime_into_tempo(

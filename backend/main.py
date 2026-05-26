@@ -85,7 +85,10 @@ async def _wipe_tempo_on_startup() -> None:
     _scraper_seeder.reset_flags()
     clear_all_in_memory_sessions()
 
-app.add_event_handler("startup", _wipe_tempo_on_startup)
+# (Removed duplicate add_event_handler — the @app.on_event("startup")
+# decorator above already registers _wipe_tempo_on_startup. Registering it
+# twice caused the tempo wipe + clear_all_in_memory_sessions to run twice on
+# every boot, which races with anything that depends on FLAGS being reset.)
 
 
 # ─── 4.0 GET /api/v1/system_status — frontend popup gate ─────────────

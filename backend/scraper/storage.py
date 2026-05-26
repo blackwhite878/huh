@@ -182,31 +182,51 @@ def write_tempo(region: str, session_id: str, rows: List[ScrapedProperty]) -> Pa
     return p
 
 
-def append_tempo(region: str, session_id: str, rows: List[ScrapedProperty]) -> int:
+def append_tempo(region: str, session_id: str, rows: List[Dict]) -> int:
+    """Append scraped dict rows into the session tempo JSON, dedup by URL.
+
+    BUG FIX: the previous implementation declared rows as List[ScrapedProperty]
+    and used attribute access (r.listing_url, r.model_dump()), but every real
+    call site (seeder._scrape_one_type_persist) passes plain dicts produced by
+    mudah_scraper._parse_detail. That raised AttributeError on the first
+    realtime success. It also read existing rows via dict.get while read_tempo
+    returned Pydantic models — that path raised AttributeError too. Treat
+    rows + existing uniformly as dicts; write_tempo already accepts both.
+    """
     existing = read_tempo(region, session_id)
     existing_urls = {r.get("listing_url") for r in existing if r.get("listing_url")}
-    merged = list(existing)
+    merged: List[Dict] = list(existing)
     added = 0
     seen_in_batch: set = set()
     for r in rows:
-        url = r.listing_url  # Access directly from ScrapedProperty
+        url = r.get("listing_url") if isinstance(r, dict) else getattr(r, "listing_url", None)
         if not url or url in existing_urls or url in seen_in_batch:
             continue
         seen_in_batch.add(url)
-        merged.append(r.model_dump()) # Append dict representation
+        merged.append(r if isinstance(r, dict) else r.model_dump())
         added += 1
     if added:
-        write_tempo(region, session_id, [ScrapedProperty(**r) for r in merged]) # Re-validate on write
+        write_tempo(region, session_id, merged)
     return added
 
 
-def read_tempo(region: str, session_id: str) -> List[ScrapedProperty]:
+def read_tempo(region: str, session_id: str) -> List[Dict]:
+    """Read the per-session tempo JSON as a list of dicts.
+
+    BUG FIX: previously returned List[ScrapedProperty]; every downstream
+    consumer (search_pipeline._row_to_property and scraper.ranking_agent
+    ._score_one) then called .get() on the items, which only exists on
+    dicts and raised AttributeError. The on-disk format is JSON dicts,
+    so returning them verbatim is both correct and 1:1 with what
+    write_tempo serialized.
+    """
     p = tempo_path(region, session_id)
     if not p.exists():
         return []
     with p.open("r", encoding="utf-8") as f:
         data = json.load(f)
-    return [ScrapedProperty(**r) for r in data.get("rows", [])]
+    rows = data.get("rows", []) or []
+    return [r for r in rows if isinstance(r, dict)]
 
 
 # ─── ranked JSON (top-10 output of ranking agent) ──────────────────
