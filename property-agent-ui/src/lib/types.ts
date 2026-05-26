@@ -36,10 +36,25 @@ export interface Phase1Form {
   identity: Identity;
   gender: Gender;
   description: string;
-  // Backend-only payload fields. No Phase 1 UI input today; default to "" so
-  // the backend always receives a stable string contract.
+  // REVIEW (low-risk, not auto-fixed): the backend Phase1Data Pydantic model
+  // (backend/schemas.py:Phase1Data) does NOT declare `house_type` or
+  // `location`. Pydantic v2's default config silently drops unknown fields,
+  // so these two values are sent over the wire and immediately discarded
+  // server-side — every downstream `getattr(phase1_data, "house_type", "")`
+  // returns "". Either remove these fields from the contract or add them to
+  // Phase1Data. Left as-is to avoid changing the wire protocol.
   house_type: string;
   location: string;
+}
+
+// Aligned 1:1 with PropertyResult by index in the same response.
+// See backend/schemas.py:PropertyRemark.
+export interface PropertyRemark {
+  property_id: string;
+  tier: "tier_1" | "tier_2";
+  remarks: string;
+  missing_features: string[];
+  remedy: string | null;
 }
 
 // Aligned to backend DialogueMessage.role contract (user | assistant only)
@@ -104,6 +119,10 @@ export interface SearchStatusResponse {
   tier3_triggered?: boolean;
   degraded?: boolean;
   results?: PropertyResult[];
+  // Backend builds this via build_remarks_for_batch and aligns it 1:1 with
+  // `results` (same length, same index). Entries may be null when no remark
+  // was generated for that property. See backend/main.py:build_remarks_for_batch.
+  remarks?: (PropertyRemark | null)[];
 }
 
 // Distinct from SearchStatusResponse — used by POST /next_batch
@@ -114,6 +133,8 @@ export interface NextBatchResponse {
   tier3_triggered: boolean;
   degraded: boolean;
   results: PropertyResult[];
+  // Same 1:1 alignment contract as SearchStatusResponse.remarks above.
+  remarks?: (PropertyRemark | null)[];
 }
 
 export interface RejectSingleResponse {

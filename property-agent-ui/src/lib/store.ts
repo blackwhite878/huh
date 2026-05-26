@@ -4,6 +4,7 @@ import type {
   DialogueMessage,
   PendingConflict,
   Phase1Form,
+  PropertyRemark,
   PropertyResult,
   SearchStage,
 } from "./types";
@@ -146,6 +147,7 @@ interface AppStore {
     has_more?: boolean;
     tier3_triggered?: boolean;
     degraded?: boolean;
+    remarks?: (PropertyRemark | null)[];
   }) => void;
 
   // Rejection
@@ -260,15 +262,40 @@ export const useAppStore = create<AppStore>((set, get) => {
     setSearchStage: (s) => set({ searchStage: s }),
 
     ...initialResults,
-    setResults: (data) =>
+    setResults: (data) => {
+      // FIX A (remarks pipeline): backend returns `remarks` as a list of
+      // (PropertyRemark | null) aligned 1:1 by index with `results`, but the
+      // frontend previously ignored it entirely — every card fell back to
+      // the "analysis pending" placeholder even when the LLM had produced
+      // real commentary. Merge by index here so downstream components keep
+      // reading ai_remarks/missing_features/remedy/tier off PropertyResult
+      // without needing to know about the parallel array. Prefer the
+      // remark's value when present, but never overwrite an existing
+      // PropertyResult field with null/undefined.
+      const incomingResults = data.results;
+      const merged: PropertyResult[] | undefined = incomingResults
+        ? incomingResults.map((p, i) => {
+            const rk = data.remarks?.[i];
+            if (!rk) return p;
+            return {
+              ...p,
+              tier: rk.tier ?? p.tier,
+              ai_remarks: rk.remarks ?? p.ai_remarks,
+              missing_features:
+                rk.missing_features ?? p.missing_features,
+              remedy: rk.remedy ?? p.remedy ?? null,
+            };
+          })
+        : undefined;
       set({
-        currentBatch: data.results ?? get().currentBatch,
+        currentBatch: merged ?? get().currentBatch,
         batchIndex: data.batch_index ?? get().batchIndex,
         totalAvailable: data.total_available ?? get().totalAvailable,
         hasMore: data.has_more ?? get().hasMore,
         tier3Triggered: data.tier3_triggered ?? get().tier3Triggered,
         degraded: data.degraded ?? get().degraded,
-      }),
+      });
+    },
 
     rejectionCount: 0,
     rejectedIds: [],

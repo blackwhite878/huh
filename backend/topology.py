@@ -1,7 +1,16 @@
 """
 行政區拓撲圖 - 開發前凍結
 Used for administrative district expansion in search pipeline.
+
+REVIEW (low-risk, not auto-fixed): this file is a ~1490-line hand-curated
+adjacency map. It was NOT statically audited in this pass — there is no
+schema enforced on the dict values, so a typo in a level_*_adjacent key or
+a dangling reference to a removed district will silently degrade the
+expansion result without raising. Recommend adding a one-shot validator
+(every key referenced in level_n_adjacent must exist as a top-level key)
+to scraper bootstrap to catch drift the next time this file is edited.
 """
+
 
 TOPOLOGY_GRAPH = {
 

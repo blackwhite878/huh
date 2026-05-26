@@ -369,6 +369,13 @@ def _build_search_url(
 
 
 def _extract_listing_urls(html: str) -> List[str]:
+    # REVIEW (low-risk, not auto-fixed): both _extract_listing_urls and
+    # _parse_detail (line ~585) rely on the live mudah.my DOM — CSS
+    # selectors, LISTING_HREF_RE, and the attribute names parsed out of
+    # each detail page. None of that can be statically verified from this
+    # codebase; the only guarantee is runtime + golden-fixture coverage.
+    # Treat any silent regression (empty url list, all-None fields after a
+    # successful HTTP 200) as a selector-drift signal, not a logic bug.
     soup = BeautifulSoup(html, "html.parser")
     urls: List[str] = []
     seen = set()

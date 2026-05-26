@@ -665,6 +665,14 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
         )
 
     # Add user message to history
+    # REVIEW (low-risk, not auto-fixed): this writes the user turn BEFORE the
+    # LLM call. If the client retries the same POST /chat (network blip,
+    # 502, user double-click) the same message is appended to
+    # dialogue_history twice, and the next prompt to the LLM contains a
+    # duplicated user turn. A correct fix needs an idempotency key on
+    # ChatRequest (e.g. client-generated message_id) plus dedup inside
+    # add_dialogue_message; left as REVIEW because it changes the API
+    # contract.
     add_dialogue_message(request.session_id, "user", request.message)
 
     # Build conversation for LLM
