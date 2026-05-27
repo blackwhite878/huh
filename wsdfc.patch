@@ -1,38 +1,26 @@
 --- a/backend/scraper/pure_fetch_realtime.py
 +++ b/backend/scraper/pure_fetch_realtime.py
-@@ -42,6 +42,35 @@
-       counts = await run_pure_fetch_realtime()
- """
- from __future__ import annotations
-+
-+# ── Direct-script bootstrap ──────────────────────────────────────────
-+# This module ships with package-relative imports (`from . import storage`,
-+# `from .mudah_scraper import ...`) and is intended to be launched as
-+# `python -m scraper.pure_fetch_realtime` (or `python -m
-+# backend.scraper.pure_fetch_realtime`). When users invoke it directly
-+# via `python backend/scraper/pure_fetch_realtime.py`, Python sets
-+# __package__ to None and the relative imports blow up with
-+# "ImportError: attempted relative import with no known parent package".
-+# To keep the documented `python -m` entrypoint working AND let direct
-+# execution "just work", detect the no-parent-package case, inject the
-+# repo root into sys.path, and re-execute ourselves as the proper
-+# `backend.scraper.pure_fetch_realtime` module via runpy. This shim is
-+# a strict no-op for normal `-m` / import use because the guard requires
-+# both __name__ == "__main__" AND an empty __package__.
-+if __package__ in (None, "") and __name__ == "__main__":
-+    import os as _os, sys as _sys, runpy as _runpy
-+    _here = _os.path.abspath(_os.path.dirname(__file__))
-+    # .../<repo>/backend/scraper/pure_fetch_realtime.py -> repo root
-+    _repo_root = _os.path.dirname(_os.path.dirname(_here))
-+    if _repo_root not in _sys.path:
-+        _sys.path.insert(0, _repo_root)
-+    _runpy.run_module(
-+        "backend.scraper.pure_fetch_realtime",
-+        run_name="__main__",
-+        alter_sys=True,
-+    )
-+    _sys.exit(0)
-+
- 
- import argparse
- import asyncio
+@@ -60,12 +60,18 @@
+ if __package__ in (None, "") and __name__ == "__main__":
+     import os as _os, sys as _sys, runpy as _runpy
+     _here = _os.path.abspath(_os.path.dirname(__file__))
+-    # .../<repo>/backend/scraper/pure_fetch_realtime.py -> repo root
+-    _repo_root = _os.path.dirname(_os.path.dirname(_here))
+-    if _repo_root not in _sys.path:
+-        _sys.path.insert(0, _repo_root)
++    # .../<repo>/backend/scraper/pure_fetch_realtime.py
++    # sibling `storage.py` does `from schemas import ScrapedProperty`,
++    # which lives at backend/schemas.py — so `backend/` must also be on
++    # sys.path, mirroring the documented `python -m scraper.pure_fetch_realtime`
++    # invocation from inside backend/.
++    _backend_dir = _os.path.dirname(_here)
++    _repo_root = _os.path.dirname(_backend_dir)
++    for _p in (_repo_root, _backend_dir):
++        if _p not in _sys.path:
++            _sys.path.insert(0, _p)
+     _runpy.run_module(
+-        "backend.scraper.pure_fetch_realtime",
++        "scraper.pure_fetch_realtime",
+         run_name="__main__",
+         alter_sys=True,
+     )

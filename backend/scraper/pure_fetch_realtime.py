@@ -60,12 +60,18 @@ from __future__ import annotations
 if __package__ in (None, "") and __name__ == "__main__":
     import os as _os, sys as _sys, runpy as _runpy
     _here = _os.path.abspath(_os.path.dirname(__file__))
-    # .../<repo>/backend/scraper/pure_fetch_realtime.py -> repo root
-    _repo_root = _os.path.dirname(_os.path.dirname(_here))
-    if _repo_root not in _sys.path:
-        _sys.path.insert(0, _repo_root)
+    # .../<repo>/backend/scraper/pure_fetch_realtime.py
+    # sibling `storage.py` does `from schemas import ScrapedProperty`,
+    # which lives at backend/schemas.py — so `backend/` must also be on
+    # sys.path, mirroring the documented `python -m scraper.pure_fetch_realtime`
+    # invocation from inside backend/.
+    _backend_dir = _os.path.dirname(_here)
+    _repo_root = _os.path.dirname(_backend_dir)
+    for _p in (_repo_root, _backend_dir):
+        if _p not in _sys.path:
+            _sys.path.insert(0, _p)
     _runpy.run_module(
-        "backend.scraper.pure_fetch_realtime",
+        "scraper.pure_fetch_realtime",
         run_name="__main__",
         alter_sys=True,
     )
