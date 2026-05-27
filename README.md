@@ -1,50 +1,50 @@
 # Property Agent UI
 
-An AI-powered Malaysian property search agent that combines a conversational LLM interface with live scraping of [Mudah.my](https://www.mudah.my). Users describe what they're looking for, the agent profiles their needs, scrapes real listings, classifies them into match tiers, weights results dynamically, and walks the user through a ranked shortlist — all in a chat-style UI.
+An AI-powered Malaysian property search agent. Describe what you want, the agent profiles your needs through conversation, scrapes live listings from [Mudah.my](https://www.mudah.my), classifies and ranks them, then walks you through a shortlist — all in a chat-style UI.
 
 ---
 
-## Architecture Overview
+## Architecture
 
 ```
-property-agent-ui/   ← React 19 + TanStack Router frontend (Vite)
-backend/             ← FastAPI Python backend
-  main.py            ← All REST endpoints
-  llm_client.py      ← Chutes AI integration (DeepSeek-V3, Llama, Qwen)
-  search_pipeline.py ← Scrape → tier classify → weight → LLM remarks
-  scraper/           ← Mudah.my async scraper (Playwright + BS4)
-  session_manager.py ← In-memory session state
-  topology.py        ← Malaysian district/region graph
-  config.yaml        ← LLM model + scraper config
+property-agent-ui/        ← React 19 + TanStack Router (Vite)
+backend/
+  main.py                 ← FastAPI — all REST endpoints
+  llm_client.py           ← Chutes AI client (DeepSeek-V3, Llama, Qwen)
+  search_pipeline.py      ← Scrape → tier classify → weight → remarks
+  scraper/                ← Mudah.my async scraper (Playwright + BS4)
+  session_manager.py      ← In-memory session state
+  topology.py             ← Malaysian district/region graph
+  config.yaml             ← LLM model + scraper config
 ```
 
-**LLM Provider:** [Chutes AI](https://chutes.ai) (OpenAI-compatible API, hosts DeepSeek-V3, Llama 3.1, Qwen 2.5)
-
-**Scraper mode:** `realtime` (live Mudah.my scrape) or `demo` (bundled CSV fallback — no API key or internet needed for demo)
+**LLM:** [Chutes AI](https://chutes.ai) — OpenAI-compatible, hosts DeepSeek-V3, Llama 3.1, Qwen 2.5  
+**Scraper mode:** `realtime` (live Mudah.my) or `demo` (bundled CSV — no API key needed)
 
 ---
 
 ## Prerequisites
 
-| Tool | Min version |
-|------|-------------|
-| Python | 3.10+ |
-| Node.js | 18+ |
-| npm | 9+ |
+| Tool    | Version |
+|---------|---------|
+| Python  | 3.10+   |
+| Node.js | 18+     |
+| npm     | 9+      |
 
 ---
 
-## 1 — Get a Chutes AI API Key
+## Setup
+
+### 1 — Get a Chutes AI API key
 
 1. Sign up at <https://chutes.ai>
 2. Generate an API key from your dashboard
-3. Keep it handy — you'll paste it into `.env` below
 
-> **No key?** You can still run the backend in `demo` mode (see Step 3).
+> Skip this if you only want to run in **demo mode** — no key required.
 
 ---
 
-## 2 — Clone the repo
+### 2 — Clone
 
 ```bash
 git clone --depth 1 https://github.com/MAXAJIE/wsdfc.git
@@ -53,36 +53,25 @@ cd wsdfc
 
 ---
 
-## 3 — Backend setup
+### 3 — Backend
 
-### macOS / Linux
+#### macOS / Linux
 
 ```bash
 cd backend
 
-# Create and activate virtualenv
 python3 -m venv venv
 source venv/bin/activate
 
-# Install Python dependencies
 pip install -r ../requirements.txt
-
-# Install Playwright browsers (needed for live scraping)
 playwright install chromium
 
-# Create your .env
 cp .env.example .env
+# Open .env and add your key:
+# CHUTES_AI_API_KEY=your-key-here
 ```
 
-Open `.env` and paste your API key:
-
-```
-CHUTES_AI_API_KEY=your-key-here
-CHUTES_AI_BASE_URL=https://llm.chutes.ai/v1
-APP_SECRET_KEY=change-me-in-production
-```
-
-### Windows
+#### Windows
 
 ```cmd
 cd backend
@@ -94,11 +83,21 @@ pip install -r ..\requirements.txt
 playwright install chromium
 
 copy .env.example .env
+REM Open .env and add your key:
+REM CHUTES_AI_API_KEY=your-key-here
 ```
 
-Then edit `.env` with your API key.
+#### `.env` reference
 
-### Demo mode (no API key / no internet scraping)
+```
+CHUTES_AI_API_KEY=your-key-here
+CHUTES_AI_BASE_URL=https://llm.chutes.ai/v1
+APP_SECRET_KEY=change-me-in-production
+```
+
+---
+
+### 4 — Demo mode (no API key, no scraping)
 
 In `backend/config.yaml`, set:
 
@@ -107,98 +106,105 @@ scraper:
   mode: "demo"
 ```
 
-The backend will serve bundled mock listings instead of live scrapes, and the UI will display a popup indicating demo mode is active.
+The backend serves bundled mock listings and the UI shows a degradation popup. Good for local development and UI work.
 
 ---
 
-## 4 — Run the backend
+### 5 — Run the backend
 
 ```bash
-# Still inside backend/ with venv active
-python startup.py
-```
-
-`startup.py` runs pre-flight checks (Python version, deps, `.env`, config, mock data) and then launches uvicorn on **http://localhost:8000**.
-
-Alternatively, launch uvicorn directly:
-
-```bash
+# Inside backend/ with venv active
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Verify it's up:
+Verify:
 
-```
-http://localhost:8000/docs      ← Swagger UI
-http://localhost:8000/redoc     ← ReDoc
-```
+| URL | Description |
+|-----|-------------|
+| `http://localhost:8000/docs` | Swagger UI |
+| `http://localhost:8000/redoc` | ReDoc |
 
 ---
 
-## 5 — Frontend setup
+### 6 — Run the frontend
 
 Open a **new terminal** from the repo root:
 
 ```bash
 cd property-agent-ui
-
 npm install
-
-# Point the frontend at your local backend
-# (the default dev proxy already targets http://localhost:8000)
 npm run dev
 ```
 
-Open **http://localhost:5173** in your browser.
+Open **http://localhost:5173**
+
+The Vite dev proxy already points to `http://localhost:8000` — no extra config needed.
 
 ---
 
-## 6 — Quick start scripts (optional)
+### 7 — Quick-start scripts (optional)
 
-The repo ships with convenience scripts that do Steps 3–4 in one go.
+These scripts handle venv creation, dependency install, and env checks in one step.
 
 **macOS / Linux:**
 ```bash
-cd wsdfc
 bash backend/start.sh
 ```
 
 **Windows:**
 ```cmd
-cd wsdfc
 backend\start.bat
 ```
 
-After the backend is up, still run the frontend manually (Step 5).
+Then run the frontend separately (Step 6).
 
 ---
 
-## How it works — user flow
+## Realtime mode notes
 
-1. **Phase 1 form** — enter budget, target (e.g. "condo in Johor Bahru"), buyer identity, preferred agent style
-2. **Semantic alignment** — LLM extracts structured tags from free-text input
-3. **Conversation** — agent asks clarifying questions and detects preference conflicts
-4. **Search** — pipeline scrapes Mudah.my for the matched districts, classifies listings into Tier 1 / 2 / 3, applies dynamic weighting, generates LLM remarks per property
-5. **Results** — two batches of 5 listings shown; user can reject individual listings or all of them
-6. **Resolution** — on full rejection the agent offers "refine search" (new prompt) or "keep memories" (soft reset)
+Set `mode: "realtime"` in `config.yaml` to scrape live listings.
+
+**Recommended for testing:** choose **Johor Bahru, Johor** as your location — it's the best-supported region. Scraping other regions may be slow or incomplete.
+
+Watch the backend console for scraper progress:
+
+```
+[scrape] list region=johor type=condo page=1 extracted=40 new=40 (running_total=40)
+[scrape] list region=johor type=condo page=2 extracted=41 new=41 (running_total=81)
+[scrape] region=johor url=https://www.mudah.my/... title='...' price=550000.0 bedrooms=4
+```
+
+If the scraper fails three consecutive times it auto-degrades to demo mode and the UI shows a popup.
 
 ---
 
-## API reference (key endpoints)
+## User flow
+
+1. **Phase 1** — set budget, describe your target, pick buyer identity and agent style
+2. **Alignment** — LLM extracts structured preference tags from your free-text description
+3. **Conversation** — agent asks clarifying questions; detects and resolves preference conflicts
+4. **Search** — pipeline scrapes Mudah.my, classifies listings into Tier 1/2, applies dynamic weights, generates per-property AI remarks
+5. **Results** — two batches of 5 listings; reject individually or all at once
+6. **Resolution** — on full rejection, choose "refine search" (full reset) or "keep memories" (soft reset, NPP tags preserved)
+
+---
+
+## API reference
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/api/v1/init_session` | Start a session with Phase 1 data |
-| `GET`  | `/api/v1/session_ready/{id}` | Poll until semantic alignment finishes |
+| `POST` | `/api/v1/init_session` | Start session with Phase 1 data |
+| `GET`  | `/api/v1/session_ready/{id}` | Poll semantic alignment status |
 | `POST` | `/api/v1/chat` | Send a chat message |
 | `GET`  | `/api/v1/search_status/{id}` | Poll search pipeline progress |
-| `GET`  | `/api/v1/next_batch/{id}` | Fetch second batch of results |
+| `POST` | `/api/v1/next_batch` | Fetch second batch of results |
 | `POST` | `/api/v1/reject_single` | Reject one listing |
 | `POST` | `/api/v1/reject_all` | Reject all, trigger NPP learning |
 | `POST` | `/api/v1/resolve_action` | Choose next step after full rejection |
-| `GET`  | `/api/v1/system_status` | Health check + demo mode flag |
+| `GET`  | `/api/v1/system_status` | Scraper health + demo/degraded flags |
 
 **Example — init session:**
+
 ```bash
 curl -X POST http://localhost:8000/api/v1/init_session \
   -H "Content-Type: application/json" \
@@ -207,13 +213,14 @@ curl -X POST http://localhost:8000/api/v1/init_session \
     "agent_style": "Professional",
     "target": "condo in Johor Bahru",
     "identity": "first_time_buyer",
-    "gender": "female"
+    "gender": "female",
+    "description": "Looking for a family home near good schools, prefer gated community"
   }'
 ```
 
 ---
 
-## Configuration reference
+## Configuration
 
 `backend/config.yaml`:
 
@@ -224,14 +231,14 @@ llm:
   concurrency: 3                           # max parallel LLM calls
 
 scraper:
-  mode: "realtime"          # "realtime" | "demo"
+  mode: "demo"              # "realtime" | "demo"
   retries: 3
-  realtime_budget_seconds: 90   # abort slow scrapes after this many seconds
+  realtime_budget_seconds: 90
 ```
 
-Per-phase models can be overridden via environment variables:
+Optional environment variable overrides:
 
-```
+```bash
 REMARKS_MODEL=chutesai/Llama-3.1-8B-Instruct
 REASONING_MODEL=Qwen/Qwen2.5-7B-Instruct
 REMARKS_MAX_TOKENS=512
@@ -244,35 +251,36 @@ REMARKS_CONCURRENCY=8
 
 ```
 wsdfc/
-├── requirements.txt                  # Python deps
+├── requirements.txt
 ├── backend/
-│   ├── .env.example                  # copy → .env, add API key
-│   ├── config.yaml                   # LLM + scraper settings
-│   ├── main.py                       # FastAPI app + all endpoints
-│   ├── llm_client.py                 # Chutes AI async client
-│   ├── search_pipeline.py            # end-to-end search orchestration
-│   ├── session_manager.py            # in-memory session store
-│   ├── schemas.py                    # Pydantic models
-│   ├── topology.py                   # Malaysian district graph
-│   ├── weighting.py                  # dynamic property scoring
-│   ├── mock_data.py                  # demo-mode fixture data
-│   ├── npp_enum.py / positive_enum.py # preference tag enums
-│   ├── startup.py                    # pre-flight checks + uvicorn launcher
-│   ├── start.sh / start.bat          # convenience start scripts
+│   ├── .env.example
+│   ├── config.yaml
+│   ├── main.py
+│   ├── llm_client.py
+│   ├── search_pipeline.py
+│   ├── session_manager.py
+│   ├── schemas.py
+│   ├── topology.py
+│   ├── weighting.py
+│   ├── mock_data.py
+│   ├── npp_enum.py
+│   ├── positive_enum.py
+│   ├── startup.py
+│   ├── start.sh / start.bat
 │   └── scraper/
-│       ├── mudah_scraper.py          # Playwright + BS4 scraper
-│       ├── pipeline.py               # scrape orchestration
-│       ├── seeder.py                 # district seed logic
-│       ├── storage.py                # scraped data store
-│       └── live_filter.py            # real-time listing filter
+│       ├── mudah_scraper.py
+│       ├── pipeline.py
+│       ├── seeder.py
+│       ├── storage.py
+│       └── live_filter.py
 └── property-agent-ui/
     ├── package.json
     ├── vite.config.ts
     └── src/
-        ├── routes/                   # TanStack Router pages
-        ├── components/               # React components by phase
-        ├── hooks/                    # custom React hooks
-        └── lib/                      # store (Zustand), API client, utils
+        ├── routes/
+        ├── components/
+        ├── hooks/
+        └── lib/
 ```
 
 ---
@@ -282,22 +290,23 @@ wsdfc/
 **Backend won't start — missing `.env`**
 ```bash
 cp backend/.env.example backend/.env
-# then add your CHUTES_AI_API_KEY
+# Add CHUTES_AI_API_KEY
 ```
 
-**Playwright browser not found**
+**`playwright install` not found**  
+Make sure your venv is active, then run:
 ```bash
 playwright install chromium
 ```
 
-**Live scrape always fails / falls back to demo**
-Mudah.my may be rate-limiting or blocking headless requests. Either wait and retry, increase `realtime_budget_seconds` in `config.yaml`, or switch to `mode: "demo"` for development.
+**Live scrape always falls back to demo**  
+Mudah.my may be rate-limiting headless requests. Try increasing `realtime_budget_seconds` in `config.yaml`, or switch to `mode: "demo"` for development.
 
-**CORS errors in the browser**
-Make sure the backend is running on port 8000 and the frontend dev server is on port 5173. The FastAPI CORS middleware allows all origins by default in this build.
+**CORS errors in the browser**  
+Confirm the backend is on port `8000` and the frontend dev server is on port `5173`. The FastAPI CORS middleware allows all origins in this build.
 
-**`python` not found on macOS/Linux**
-Use `python3` — the `start.sh` script already handles this.
+**`python` not found on macOS / Linux**  
+Use `python3`. The `start.sh` script handles this automatically.
 
 ---
 

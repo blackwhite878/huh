@@ -16,7 +16,7 @@ llm:
 #                      append to long-term CSV (pandas-merged, dedup by
 #                      listing_url). Ignores brief.target. No ranking.
 scraper:
-  mode: "realtime"
+  mode: "demo"
   retries: 3
   # Hard wall-clock per region (overrides scraper GLOBAL_DEADLINE_SEC).
   # Reaching this aborts in-flight detail fetches for the region and uses
