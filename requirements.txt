@@ -22,5 +22,6 @@ pytest
 npm
 playwright
 chromium
-node.js
-
+fastapi
+lxml
+tenacity

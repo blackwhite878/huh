@@ -441,7 +441,7 @@ def _build_phase2_system_prompt(dialogue_session, client_context: dict | None) -
             "預計購入時間 purchase_timeline（何時計劃下訂 / 完成購入）"
         )
         financing_q = "融資方式 financing（現金 / 房貸）與預期持有年期 hold_period"
-        extra_must_fill = "8. 預期租金回報 / 投資回報率 yield_target"
+        extra_must_fill = "9. 預期租金回報 / 投資回報率 yield_target"
         identity_rule = (
             "用戶身份為 investor：嚴禁出現「入住」「自住」「打算何時搬進」之類措辭。"
             "所有時間問題改問購入時程、持有年期、出租計劃與回報。"
@@ -454,7 +454,7 @@ def _build_phase2_system_prompt(dialogue_session, client_context: dict | None) -
             "融資方式 financing（現金 / 房貸）"
         )
         extra_must_fill = (
-            "8. 現有自住房的處置計劃 current_home_plan（出售 / 出租 / 保留）與時程"
+            "9. 現有自住房的處置計劃 current_home_plan（出售 / 出租 / 保留）與時程"
         )
         identity_rule = (
             "用戶身份為 upgrader：需同時關心新居入住時間與現有房屋如何處置。"
@@ -479,6 +479,9 @@ def _build_phase2_system_prompt(dialogue_session, client_context: dict | None) -
         f"6. {financing_q}",
         "7. 必備設施 must_haves（停車位、保安、泳池、近捷運… 至少 1 項；"
         "用戶若明確說「沒有特別要求」也算有效回答）",
+        "8. 房產類型 property_type（必須明確一項：house / condo / apartment / "
+        "townhouse / landed / commercial / land；若 Phase 1 house_type 已明確"
+        "對應其中一項則跳過，用戶主動更新走衝突檢測）"
     ]
     if extra_must_fill:
         must_fill_lines.append(extra_must_fill)

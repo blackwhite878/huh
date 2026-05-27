@@ -625,9 +625,12 @@ def _parse_detail(html: str, url: str, region: str, type_key: str) -> Dict:
     region_name = nd_fields.get("region_raw") or region
     area_name = nd_fields.get("location")
     if not area_name:
-        meta_kw = soup.find("meta", {"name": "keywords"})
-        if meta_kw:
-            area_name = (meta_kw.get("content") or "").split(",")[0].strip() or None
+        og_t = soup.find("meta", property="og:title")
+        if og_t:
+            # 格式: "...sq.ft, <Area>, <State> <list_id> | Mudah.my"
+            m = re.search(r",\s*([^,|]+?),\s*[A-Za-z ]+?\s+\d{6,}\s*\|", og_t.get("content", ""))
+            if m:
+                area_name = m.group(1).strip()
 
     state = None
     # State extraction from address or meta
@@ -656,11 +659,8 @@ def _parse_detail(html: str, url: str, region: str, type_key: str) -> Dict:
     longitude = nd_fields.get("longitude")
 
     # ── 4. PROPERTY CORE ──
-    transaction_type = None
-    if "rent" in text.lower() or type_key == "rent":
-        transaction_type = "For Rent"
-    else:
-        transaction_type = "For Sale"
+    # 取代 L659-663
+    transaction_type = "For Rent" if type_key == "rent" else "For Sale"
 
     property_type = type_key
     property_sub_type = nd_fields.get("property_type_specific")
