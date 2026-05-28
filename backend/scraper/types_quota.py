@@ -55,5 +55,25 @@ TYPE_SEARCH_KEYWORD: Dict[str, str] = {
 }
 
 
+# Per-type category-specific Mudah path. The generic
+# `/{region}/properties-for-sale?q=<keyword>` page tends to come back as
+# a Next.js shell with no cards in the SSR HTML (anchors only appear
+# after client-side hydration), which silently broke list extraction.
+# Category paths render the actual filtered listing list server-side.
+#
+# CALIBRATION: these paths are reasonable defaults derived from Mudah's
+# public taxonomy. If any returns 404 in production, _build_search_url
+# self-heals by retrying with the generic path (LIST_PATH_TEMPLATE) on
+# the same page. Edit ONE entry below to permanently fix a wrong path.
+TYPE_URL_PATH: Dict[str, str] = {
+    "condo":         "/{region}/properties-for-sale/condominiums-apartments",
+    "apartment":     "/{region}/properties-for-sale/condominiums-apartments",
+    "double-storey": "/{region}/properties-for-sale/houses",
+    "single-storey": "/{region}/properties-for-sale/houses",
+    "bungalow":      "/{region}/properties-for-sale/bungalow",
+    "townhouse":     "/{region}/properties-for-sale/townhouse",
+}
+
+
 def display_region(region_key: str) -> str:
     return region_key.replace("-", " ").title()

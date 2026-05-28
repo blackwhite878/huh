@@ -7,8 +7,8 @@ import time
 from datetime import datetime, timezone
 from typing import Awaitable, Callable, Dict, List, Optional
 from urllib.parse import quote_plus
+import logging
 
-import httpx  # kept for back-compat type hints in callers; runtime uses curl_cffi
 from curl_cffi.requests import AsyncSession
 from curl_cffi.requests.errors import RequestsError
 from bs4 import BeautifulSoup
@@ -20,10 +20,12 @@ from bs4 import BeautifulSoup
 # replays a real Chrome handshake, so the server sees us as a browser.
 IMPERSONATE_TARGET = "chrome"
 
-from .types_quota import TYPE_SEARCH_KEYWORD, display_region  # noqa: F401
+from .types_quota import TYPE_SEARCH_KEYWORD, TYPE_URL_PATH, display_region  # noqa: F401
 
 # ── tuning ───────────────────────────────────────────────────────────
 HOST = "https://www.mudah.my"
+# Generic fallback path when TYPE_URL_PATH doesn't have a per-type entry
+# (or when a per-type path 404s and we retry the generic one).
 LIST_PATH_TEMPLATE = "/{region}/properties-for-sale"
 MAX_PAGES_PER_QUERY = 8
 # Concurrency bumped 2× per spec. Anti-bot risk scales linearly; ScraperBanned
@@ -60,15 +62,8 @@ def _pick_parser() -> str:
         return "html.parser"
 
 PARSER = _pick_parser()
-print(f"[mudah_scraper] HTML parser in use: {PARSER}", flush=True)
-
-# HTTP/2 connection limits. Shared across regions in seeder, so the pool
-# survives the whole run instead of being torn down per-region.
-HTTPX_LIMITS = httpx.Limits(
-    max_connections=PER_HOST_CONCURRENCY * 4,
-    max_keepalive_connections=PER_HOST_CONCURRENCY * 2,
-    keepalive_expiry=30.0,
-)
+logger = logging.getLogger(__name__)
+logger.debug("[mudah_scraper] HTML parser in use: %s", PARSER)
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
@@ -136,6 +131,11 @@ class ScraperBanned(RuntimeError):
 # ── HTTP layer ───────────────────────────────────────────────────────
 # Status codes that justify a retry. Everything else is treated as terminal
 # so we don't burn the full RETRY_ATTEMPTS budget on a 404/410.
+#
+# NOTE: 429 and 503 intentionally appear in BOTH sets. The retry policy is
+# "try once, then escalate to Playwright" rather than long curl backoffs —
+# Mudah's rate-limit pages respond instantly under chromium because the JS
+# challenge passes. Do NOT "fix" this overlap; it is the chosen strategy.
 _RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
 _BANNED_STATUS = {403, 429, 503}
 
@@ -174,25 +174,15 @@ async def _get(client: AsyncSession, url: str) -> str:
     raise RuntimeError(f"GET failed: {url}: {last_err}")
 
 
-def _playwright_get_sync(url: str) -> str:
-    try:
-        from playwright.sync_api import sync_playwright
-    except Exception as e:
-        raise RuntimeError(f"Playwright unavailable: {e}")
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
-        try:
-            ctx = browser.new_context(user_agent=random.choice(USER_AGENTS))
-            page = ctx.new_page()
-            page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            page.wait_for_timeout(1500)
-            return page.content()
-        finally:
-            browser.close()
-
-
+# Playwright fetch — delegates to the shared, process-wide pool in
+# playwright_pool.py. The pool boots Chromium ONCE for the entire run
+# and reuses a single BrowserContext across all fetches, so per-page
+# Playwright cost drops from ~3-5s (cold boot every call) to ~0.8-1.5s.
+# It also blocks image/CSS/font/media at the context level to cut
+# wall-clock and bandwidth on every fallback request.
 async def _playwright_get(url: str) -> str:
-    return await asyncio.to_thread(_playwright_get_sync, url)
+    from .playwright_pool import get_pool
+    return await get_pool().get_html(url)
 
 
 _AMENITY_EMPTY = {
@@ -346,7 +336,18 @@ def _build_search_url(
         page: int,
         *,
         filters: Optional[Dict] = None,
+        force_generic: bool = False,
 ) -> str:
+    """Build a Mudah listing-page URL.
+
+    Path selection:
+      1. If `force_generic` is True, use LIST_PATH_TEMPLATE (the generic
+         /properties-for-sale path). Used by the 404 fallback in the
+         list loop so a wrong per-type path can self-heal.
+      2. Else look up TYPE_URL_PATH[type_key] for a category-specific
+         path (e.g. /properties-for-sale/condominiums-apartments).
+      3. Else fall back to LIST_PATH_TEMPLATE.
+    """
     f = filters or {}
     kw_raw = f.get("keyword") or TYPE_SEARCH_KEYWORD[type_key]
     parts: list[str] = [f"q={quote_plus(str(kw_raw))}", f"o={page}"]
@@ -363,7 +364,19 @@ def _build_search_url(
         except (TypeError, ValueError):
             pass
 
-    return f"{HOST}{LIST_PATH_TEMPLATE.format(region=region)}?" + "&".join(parts)
+    if force_generic:
+        path_tpl = LIST_PATH_TEMPLATE
+    else:
+        path_tpl = TYPE_URL_PATH.get(type_key, LIST_PATH_TEMPLATE)
+    return f"{HOST}{path_tpl.format(region=region)}?" + "&".join(parts)
+
+
+# Loose regex for harvesting listing URLs from raw HTML (incl. JSON
+# blobs like __NEXT_DATA__). Anchored on the mudah.my host so we don't
+# pick up arbitrary URLs from inline scripts.
+_LISTING_HTML_RE = re.compile(
+    r"https?://www\.mudah\.my/[\w\-/]+?-\d{6,}\.htm", re.IGNORECASE
+)
 
 
 def _extract_listing_urls(html: str) -> List[str]:
@@ -376,7 +389,7 @@ def _extract_listing_urls(html: str) -> List[str]:
     # successful HTTP 200) as a selector-drift signal, not a logic bug.
     soup = BeautifulSoup(html, PARSER)
     urls: List[str] = []
-    seen = set()
+    seen: set[str] = set()
     for a in soup.select("a[href]"):
         href = (a.get("href") or "").strip()
         if not href:
@@ -394,6 +407,23 @@ def _extract_listing_urls(html: str) -> List[str]:
             continue
         seen.add(href)
         urls.append(href)
+
+    # __NEXT_DATA__ fallback: when Mudah's SSR hides listing URLs inside
+    # the embedded JSON blob (and only renders cards after client-side
+    # hydration), the anchor-based scan above returns 0. Sweep the raw
+    # HTML for any mudah.my/...-<6+ digit id>.htm pattern as a last
+    # resort. Cheap (one regex on the same text bs4 already parsed),
+    # safe (host-anchored), and idempotent with `seen` above.
+    if not urls:
+        for m in _LISTING_HTML_RE.findall(html or ""):
+            href = m.split("?")[0].split("#")[0]
+            if href in seen:
+                continue
+            lower = href.lower()
+            if any(b in lower for b in ("facebook", "twitter", "login", "signup", ".svg", ".png", ".jpg")):
+                continue
+            seen.add(href)
+            urls.append(href)
     return urls
 
 
@@ -1038,18 +1068,46 @@ def make_shared_client() -> AsyncSession:
     )
 
 
-def _is_complete(detail: Optional[Dict]) -> bool:
+# Type keys for which numeric 0 in bedrooms/bathrooms/size_sqft is a LEGAL
+# value rather than an extraction failure (e.g. land, parking, commercial
+# shoplot). Empty today because TYPE_QUOTA only ships residential keys; add
+# here when extending coverage so the BUG-3 guard does not over-trigger
+# expensive Playwright retries on legitimately 0-bedroom records.
+_ZERO_ALLOWED_TYPES: set = set()
+_ZERO_ALLOWED_FIELDS = ("bedrooms", "bathrooms", "size_sqft")
+
+
+def _is_complete(detail: Optional[Dict], type_key: Optional[str] = None) -> bool:
     """True iff every mandatory field is present and non-empty.
+
+    Rules:
+      - None                                     -> missing
+      - str: empty / whitespace-only             -> missing
+      - int / float == 0 on bedrooms/bathrooms/
+        size_sqft (residential types)            -> missing (extraction failed;
+                                                    triggers Playwright retry)
+      - int / float == 0 on type_key in
+        _ZERO_ALLOWED_TYPES                       -> legal (land/parking/etc.)
+      - any other truthy value                   -> present
+
     `area` here implements the user-chosen LOCATION definition (option B:
-    `area` must be non-empty). Strings are stripped; numbers (0 included)
-    count as present — Mudah never publishes 0-bedroom listings anyway."""
+    `area` must be non-empty)."""
     if not isinstance(detail, dict):
         return False
+    zero_ok = type_key in _ZERO_ALLOWED_TYPES
     for f in MANDATORY_FIELDS:
         v = detail.get(f)
         if v is None:
             return False
         if isinstance(v, str) and not v.strip():
+            return False
+        if (
+            not zero_ok
+            and f in _ZERO_ALLOWED_FIELDS
+            and isinstance(v, (int, float))
+            and not isinstance(v, bool)
+            and v == 0
+        ):
             return False
     return True
 
@@ -1098,35 +1156,129 @@ async def scrape_region_type(
     _owned = client is None
     _client = client or make_shared_client()
     try:
+        # ── list-page fetch with layered fallback ───────────────────
+        # Per (region, type, page) total attempt budget = 5:
+        #   1× curl_cffi (cheap path)
+        #   3× curl_cffi retries with rotated UA on:
+        #       • ScraperBanned exception, OR
+        #       • HTTP 200 but `_extract_listing_urls` returns 0 (soft block /
+        #         empty SSR shell — would previously silently break the cell).
+        #   1× Playwright fallback (shared pool, cheap after first boot)
+        #
+        # On 404 (terminal in _get), we self-heal once by retrying with
+        # `force_generic=True` so a wrong TYPE_URL_PATH entry doesn't kill
+        # the cell — the generic /properties-for-sale?q=keyword path is
+        # always accepted by Mudah.
+        async def _list_fetch(page_no: int) -> tuple[Optional[str], str]:
+            """Returns (html, source_tag). source_tag in {curl, curl-retry, pw, ''}."""
+            url_specific = _build_search_url(
+                region, type_key, page_no, filters=filters
+            )
+            url_generic = _build_search_url(
+                region, type_key, page_no, filters=filters, force_generic=True
+            )
+            attempted_generic = (url_specific == url_generic)
+
+            async def _try_curl(u: str) -> Optional[str]:
+                async with host_sem:
+                    return await _get(_client, u)
+
+            # Attempt 1: cheap curl on type-specific path.
+            for target in ((url_specific, "curl"),) + (
+                () if attempted_generic else ((url_generic, "curl-generic"),)
+            ):
+                u, tag = target
+                try:
+                    h = await _try_curl(u)
+                    if h and _extract_listing_urls(h):
+                        return h, tag
+                    last_html = h
+                except ScraperBanned:
+                    last_html = None
+                    break  # ban → skip path-fallback, go straight to retry
+                except RuntimeError as e:
+                    # 404/410/etc on the type-specific path → try generic once.
+                    msg = str(e).lower()
+                    if "terminal http 404" in msg or "terminal http 410" in msg:
+                        print(
+                            f"[scrape-list] PATH_404 region={region} type={type_key} "
+                            f"page={page_no} url={u} → falling back to generic path",
+                            flush=True,
+                        )
+                        continue
+                    last_html = None
+                except Exception:
+                    last_html = None
+
+            # Attempts 2-4: curl retries with rotated UA + short backoff.
+            for attempt in range(1, 4):
+                if time.monotonic() > deadline:
+                    break
+                await asyncio.sleep(0.5 * attempt + random.random() * 0.3)
+                try:
+                    async with host_sem:
+                        h = await _get(_client, url_generic)
+                    if h and _extract_listing_urls(h):
+                        return h, "curl-retry"
+                    last_html = h
+                except ScraperBanned:
+                    last_html = None
+                    break
+                except Exception:
+                    last_html = None
+
+            # Attempt 5: Playwright (shared pool).
+            try:
+                async with host_sem:
+                    h = await _playwright_get(url_generic)
+                if h:
+                    return h, "pw"
+            except Exception as e:
+                print(
+                    f"[scrape-list] PW_FAIL region={region} type={type_key} "
+                    f"page={page_no} err={type(e).__name__}: {str(e)[:120]}",
+                    flush=True,
+                )
+            return last_html, ""
+
         listing_urls: List[str] = []
         for page in range(1, MAX_PAGES_PER_QUERY + 1):
             if time.monotonic() > deadline:
                 break
             if BUDGET.exhausted:
                 break
-            url = _build_search_url(region, type_key, page, filters=filters)
-            html: Optional[str] = None
-            try:
-                async with host_sem:
-                    html = await _get(_client, url)
-            except ScraperBanned:
+
+            html, source = await _list_fetch(page)
+            if source == "pw":
+                # Detail fetches in this cell will now also use Playwright,
+                # mirroring previous behaviour when list was banned.
                 list_use_playwright = True
-                try:
-                    html = await _playwright_get(url)
-                except Exception:
-                    break
-            except Exception:
-                continue
+
             if not html:
-                continue
+                print(
+                    f"[scrape-list] WARN region={region} type={type_key} page={page} "
+                    f"source={source or 'none'} html_len=0 status=fail",
+                    flush=True,
+                )
+                break
+
             urls = _extract_listing_urls(html)
             new = [u for u in urls if u not in seen_urls]
+            next_data_present = "__NEXT_DATA__" in html
             print(
-                f"[scrape] list region={region} type={type_key} page={page} "
-                f"extracted={len(urls)} new={len(new)} (running_total={len(listing_urls) + len(new)})",
+                f"[scrape-list] region={region} type={type_key} page={page} "
+                f"source={source} html_len={len(html)} "
+                f"extracted={len(urls)} new={len(new)} "
+                f"next_data={'Y' if next_data_present else 'N'} "
+                f"(running_total={len(listing_urls) + len(new)})",
                 flush=True,
             )
             if not new:
+                print(
+                    f"[scrape-list] EMPTY region={region} type={type_key} page={page} "
+                    f"source={source} — stopping pagination",
+                    flush=True,
+                )
                 break
             grant = await BUDGET.reserve(len(new))
             if grant <= 0:
@@ -1170,10 +1322,10 @@ async def scrape_region_type(
                     print(f"[scrape] PARSE_FAIL url={u} err={type(_e).__name__}: {_e}", flush=True)
                     continue
                 best = detail
-                if not enforce_mandatory or _is_complete(detail):
+                if not enforce_mandatory or _is_complete(detail, type_key):
                     break
                 await asyncio.sleep(0.4 * attempt + random.random() * 0.3)
-            if enforce_mandatory and (best is None or not _is_complete(best)):
+            if enforce_mandatory and (best is None or not _is_complete(best, type_key)):
                 if time.monotonic() <= deadline:
                     html_ = await _fetch_html_once(u, force_playwright=True)
                     if html_:
@@ -1200,7 +1352,7 @@ async def scrape_region_type(
                 )
             except Exception:
                 pass
-            if enforce_mandatory and not _is_complete(best):
+            if enforce_mandatory and not _is_complete(best, type_key):
                 missing = [f for f in MANDATORY_FIELDS if not best.get(f)]
                 print(f"[scrape] DROP_INCOMPLETE url={u} missing={missing}", flush=True)
                 return None

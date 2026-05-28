@@ -23,7 +23,7 @@ import asyncio
 import logging
 from typing import Awaitable, Callable, Dict, List, Optional
 
-import httpx
+from curl_cffi.requests import AsyncSession
 
 from . import storage
 from .types_quota import (
@@ -141,7 +141,7 @@ async def _scrape_one_type_persist(
     quota: int,
     *,
     filters: Optional[Dict] = None,
-    client: Optional[httpx.AsyncClient] = None,
+    client: Optional[AsyncSession] = None,
 ) -> int:
     """Scrape one type for REALTIME mode. Persists rows into the per-session
     tempo JSON ONLY.

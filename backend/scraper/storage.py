@@ -17,7 +17,7 @@ import logging
 import shutil
 import threading
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Union
 
 import pandas as pd
 
@@ -279,7 +279,7 @@ def tempo_path(region: str, session_id: str) -> Path:
     return TEMPO_DIR / f"{region}__{session_id}.json"
 
 
-def write_tempo(region: str, session_id: str, rows: List[ScrapedProperty]) -> Path:
+def write_tempo(region: str, session_id: str, rows: List[Union[ScrapedProperty, Dict[str, Any]]]) -> Path:
     p = tempo_path(region, session_id)
     serialized = [r.model_dump() if hasattr(r, "model_dump") else dict(r) for r in rows]
     with _write_lock, p.open("w", encoding="utf-8") as f:

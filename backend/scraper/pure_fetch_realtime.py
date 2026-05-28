@@ -272,6 +272,14 @@ async def run_pure_fetch_realtime(
             await shared_client.close()
         except Exception:
             pass
+        # Tear down the shared Playwright Chromium / context so the
+        # process doesn't leak the browser between CLI runs and so a
+        # FastAPI host reaping this task doesn't keep a zombie browser.
+        try:
+            from .playwright_pool import shutdown_pool
+            await shutdown_pool()
+        except Exception:
+            pass
 
     # Clean aggregate CSV — one tidy pandas table across all regions.
     agg = _write_clean_aggregate(regions)
