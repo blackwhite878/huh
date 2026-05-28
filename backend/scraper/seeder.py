@@ -26,6 +26,7 @@ from typing import Awaitable, Callable, Dict, List, Optional
 from curl_cffi.requests import AsyncSession
 
 from . import storage
+from .query_variants import generate_query_variants
 from .types_quota import (
     MAX_PER_REGION, MY_REGIONS, TYPE_QUOTA,
 )
@@ -38,6 +39,9 @@ from .mudah_scraper import (
 # Realtime mode hard cap: stop scraping once this many listing URLs have
 # been collected (across all regions/types) and hand off to ranking.
 REALTIME_URL_CAP = 100
+# Floor below which we trigger progressive variant relaxation
+# (drop carpark → drop bedrooms → widen price ±20%). Set to 0 to disable.
+MIN_REALTIME_PER_REGION = 10
 
 logger = logging.getLogger(__name__)
 
@@ -263,6 +267,46 @@ async def fetch_realtime_into_tempo(
                 "[realtime] %s: +%d new, tempo_total=%d, budget_remaining=%d, filter=%s",
                 region, total_new, len(rows), _URL_BUDGET.remaining, live_filter,
             )
+
+            # ── Progressive variant retry ───────────────────────────────
+            # When live_filter is active and the per-region yield is below
+            # MIN_REALTIME_PER_REGION, fan out across relaxed variants in
+            # order. Stops as soon as we hit the floor OR exhaust variants
+            # OR exhaust the global URL budget.
+            if (
+                live_filter
+                and len(rows) < MIN_REALTIME_PER_REGION
+                and not _URL_BUDGET.exhausted
+            ):
+                variants = generate_query_variants(live_filter)[1:]  # skip base
+                for vi, variant in enumerate(variants, start=1):
+                    if _URL_BUDGET.exhausted:
+                        break
+                    logger.info(
+                        "[realtime] %s: variant retry %d/%d filter=%s",
+                        region, vi, len(variants), variant,
+                    )
+                    v_sem = asyncio.Semaphore(REGION_TYPE_CONCURRENCY)
+                    async def _v_bounded(t: str, q: int,
+                                          _region: str = region,
+                                          _variant: Dict = variant) -> int:
+                        async with v_sem:
+                            return await _scrape_one_type_persist(
+                                _region, session_id, t, q,
+                                filters=_variant, client=shared_client,
+                            )
+                    await asyncio.gather(
+                        *[_v_bounded(t, q) for t, q in type_plan],
+                        return_exceptions=True,
+                    )
+                    rows = storage.read_tempo(region, session_id)
+                    counts[region] = len(rows)
+                    if len(rows) >= MIN_REALTIME_PER_REGION:
+                        logger.info(
+                            "[realtime] %s: variant %d satisfied floor (%d rows)",
+                            region, vi, len(rows),
+                        )
+                        break
     finally:
         # Always disable the budget so non-realtime / subsequent runs are
         # never accidentally throttled by leftover state.

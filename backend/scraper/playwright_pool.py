@@ -101,6 +101,7 @@ class PlaywrightPool:
             *,
             goto_timeout_ms: int = 20000,
             anchor_wait_ms: int = 5000,
+            capture_listing_urls: bool = False,
     ) -> str:
         """Fetch URL with the shared browser. Returns HTML or "" on failure.
 
@@ -113,6 +114,25 @@ class PlaywrightPool:
         await self._ensure_started()
         async with self._sem:
             page = await self._context.new_page()
+            # Network-response capture for dynamically-injected listing URLs
+            # that __NEXT_DATA__ does not expose. Listener MUST be attached
+            # BEFORE goto() to avoid missing early XHR/fetch responses.
+            captured: list[str] = []
+            if capture_listing_urls:
+                import re as _re
+                _LRE = _re.compile(
+                    r"https?://www\.mudah\.my/[\w\-/]+?-\d{6,}\.htm",
+                    _re.IGNORECASE,
+                )
+                def _on_response(resp) -> None:
+                    try:
+                        u = resp.url
+                        if "mudah.my" in u and ".htm" in u:
+                            for m in _LRE.findall(u):
+                                captured.append(m)
+                    except Exception:
+                        pass
+                page.on("response", _on_response)
             try:
                 try:
                     await page.goto(url, wait_until="domcontentloaded",
@@ -129,11 +149,20 @@ class PlaywrightPool:
                     # Soft timeout — fall through and return current DOM.
                     pass
                 try:
-                    return await page.content()
+                    html = await page.content()
                 except Exception as e:
                     logger.warning("[playwright_pool] content fail %s: %s",
                                    url, str(e)[:120])
                     return ""
+                if capture_listing_urls and captured:
+                    # Append unique captured URLs as a comment block so the
+                    # downstream _LISTING_HTML_RE sweep picks them up. We use
+                    # an HTML comment to avoid corrupting BeautifulSoup parsing.
+                    uniq = list(dict.fromkeys(captured))
+                    logger.info("[playwright_pool] captured %d listing URLs via network",
+                                len(uniq))
+                    html += "\n<!-- network-captured: " + " ".join(uniq) + " -->\n"
+                return html
             finally:
                 try:
                     await page.close()

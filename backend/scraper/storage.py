@@ -226,16 +226,29 @@ def append_longterm(region: str, rows: Iterable[Dict]) -> int:
     new columns without truncation; new wide rows preserve every field)."""
     new_records: List[Dict] = []
     seen_in_batch: set = set()
+    dropped_invalid = 0
     for r in rows:
         url = r.get("listing_url") or r.get("canonical_url")
         if not url or url in seen_in_batch:
             continue
         seen_in_batch.add(url)
+        # ADDITIVE quality gate: title sanity + price plausibility.
+        # _is_complete (upstream in scraper) still owns mandatory-field
+        # enforcement; this only catches the residual junk.
+        if not is_valid_row(r):
+            dropped_invalid += 1
+            continue
         # Mirror the URL into both keys for downstream compat.
         rec = dict(r)
         rec.setdefault("listing_url", url)
         rec.setdefault("canonical_url", url)
         new_records.append(rec)
+    if dropped_invalid:
+        import logging as _lg
+        _lg.getLogger(__name__).info(
+            "[storage] append_longterm region=%s dropped %d invalid rows",
+            region, dropped_invalid,
+        )
     if not new_records:
         return 0
 

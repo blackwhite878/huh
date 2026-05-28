@@ -71,6 +71,24 @@ USER_AGENTS = [
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36",
 ]
 
+# Expanded link-noise blacklist (was 7 entries, now covers tracker / social /
+# help / agent landing pages we never want crawled as listings).
+_BAD_HREF_KEYWORDS = (
+    "facebook", "twitter", "instagram", "linkedin",
+    "login", "signup", "register",
+    "banner", "ads", "tracking", "utm_",
+    "agent", "contact", "help", "faq", "directory",
+    ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp",
+)
+# Mudah category-aggregator pages — they look listing-shaped but contain no
+# real ad. LISTING_HREF_RE catches most via the 6+ digit ID requirement;
+# this is the explicit guard against future Mudah URL shape drift.
+_FAKE_PAGES = (
+    "/property/apartment", "/property/condominium",
+    "/property/house", "/property/bungalow",
+    "/property/terrace", "/property/townhouse",
+    "/property/semi-detached",
+)
 LISTING_HREF_RE = re.compile(r"-\d{6,}\.htm(?:[?#]|$)")
 
 
@@ -350,6 +368,11 @@ def _build_search_url(
     """
     f = filters or {}
     kw_raw = f.get("keyword") or TYPE_SEARCH_KEYWORD[type_key]
+    # carpark is encoded as a free-text token appended to `q=` because
+    # Mudah has no dedicated query param. We do this BEFORE quoting so
+    # multi-word keywords stay readable in logs.
+    if f.get("carpark"):
+        kw_raw = f"{kw_raw} carpark"
     parts: list[str] = [f"q={quote_plus(str(kw_raw))}", f"o={page}"]
 
     bedrooms = f.get("bedrooms")
@@ -399,7 +422,9 @@ def _extract_listing_urls(html: str) -> List[str]:
         if not href.startswith(HOST):
             continue
         lower = href.lower()
-        if any(b in lower for b in ("facebook", "twitter", "login", "signup", ".svg", ".png", ".jpg")):
+        if any(b in lower for b in _BAD_HREF_KEYWORDS):
+            continue
+        if any(fp in lower for fp in _FAKE_PAGES):
             continue
         if not LISTING_HREF_RE.search(lower):
             continue
@@ -420,14 +445,19 @@ def _extract_listing_urls(html: str) -> List[str]:
             if href in seen:
                 continue
             lower = href.lower()
-            if any(b in lower for b in ("facebook", "twitter", "login", "signup", ".svg", ".png", ".jpg")):
+            if any(b in lower for b in _BAD_HREF_KEYWORDS):
+                continue
+            if any(fp in lower for fp in _FAKE_PAGES):
                 continue
             seen.add(href)
             urls.append(href)
     return urls
 
 
-_PRICE_RE = re.compile(r"rm[\s\u00a0]*([\d.,]+)", re.I)
+# K/M-aware: matches "RM 1.2M", "RM 550K", "RM 1,200,000". The `rm` prefix
+# is REQUIRED so we never pick up a stray "3" from "3 bedroom".
+_PRICE_RE = re.compile(r"rm[\s\u00a0]*([\d.,]+)\s*([km])?", re.I)
+_PRICE_SUFFIX = {"k": 1_000, "m": 1_000_000}
 _BED_RE = re.compile(r"(\d+)\s*(?:bed|bedroom|bedrooms)", re.I)
 _BATH_RE = re.compile(r"(\d+)\s*(?:bath|bathroom|bathrooms)", re.I)
 _SQFT_RE = re.compile(r"([\d,]+)\s*sq\s*\.?\s*ft", re.I)
@@ -438,9 +468,13 @@ def _clean_price(text: str) -> Optional[float]:
     if not m:
         return None
     try:
-        return float(m.group(1).replace(",", ""))
+        val = float(m.group(1).replace(",", ""))
     except ValueError:
         return None
+    suffix = (m.group(2) or "").lower()
+    if suffix in _PRICE_SUFFIX:
+        val *= _PRICE_SUFFIX[suffix]
+    return val
 
 
 def _extract_next_data(soup: BeautifulSoup) -> Optional[Dict]:

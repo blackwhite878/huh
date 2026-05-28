@@ -1,0 +1,546 @@
+From: Lovable Scraper Optimization
+Subject: [PATCH] backend/scraper: K/M prices, carpark filter, validator, variants, network capture
+Date: Thu, 28 May 2026 15:56:00 +0000
+
+Applies Sprint 1 + selected Sprint 2 items from the planbook review.
+See OPTIMIZATIONS.md for full rationale.
+---
+
+diff --git a/backend/scraper/live_filter.py b/backend/scraper/live_filter.py
+index 23a9bc5..1df745c 100644
+--- a/backend/scraper/live_filter.py
++++ b/backend/scraper/live_filter.py
+@@ -70,6 +70,13 @@ def _regex_house_type(text: str) -> Optional[str]:
+     return best[1]
+ 
+ 
++_CARPARK_RE = re.compile(r"(?:car\s*park|parking|carpark|停車|停车)", re.I)
++
++
++def _regex_carpark(text: str) -> bool:
++    return bool(_CARPARK_RE.search(text or ""))
++
++
+ def _regex_bedrooms(text: str) -> Optional[int]:
+     for pat in _BEDROOM_PATTERNS:
+         m = pat.search(text)
+@@ -194,6 +201,7 @@ async def build_live_filter(session_id: str) -> Dict[str, Any]:
+     regex_hint: Dict[str, Any] = {
+         "house_type": _regex_house_type(text) if text else None,
+         "bedrooms":   _regex_bedrooms(text)   if text else None,
++        "carpark":    _regex_carpark(text)    if text else False,
+     }
+ 
+     llm_hint: Dict[str, Any] = {}
+@@ -212,6 +220,8 @@ async def build_live_filter(session_id: str) -> Dict[str, Any]:
+         out["keyword"]    = TYPE_SEARCH_KEYWORD.get(house_type)
+     if bedrooms is not None:
+         out["bedrooms"] = bedrooms
++    if regex_hint.get("carpark"):
++        out["carpark"] = True
+     if lo is not None:
+         out["min_price"] = lo
+     if hi is not None:
+diff --git a/backend/scraper/mudah_scraper.py b/backend/scraper/mudah_scraper.py
+index fe42efd..5444100 100644
+--- a/backend/scraper/mudah_scraper.py
++++ b/backend/scraper/mudah_scraper.py
+@@ -71,6 +71,24 @@ USER_AGENTS = [
+     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36",
+ ]
+ 
++# Expanded link-noise blacklist (was 7 entries, now covers tracker / social /
++# help / agent landing pages we never want crawled as listings).
++_BAD_HREF_KEYWORDS = (
++    "facebook", "twitter", "instagram", "linkedin",
++    "login", "signup", "register",
++    "banner", "ads", "tracking", "utm_",
++    "agent", "contact", "help", "faq", "directory",
++    ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp",
++)
++# Mudah category-aggregator pages — they look listing-shaped but contain no
++# real ad. LISTING_HREF_RE catches most via the 6+ digit ID requirement;
++# this is the explicit guard against future Mudah URL shape drift.
++_FAKE_PAGES = (
++    "/property/apartment", "/property/condominium",
++    "/property/house", "/property/bungalow",
++    "/property/terrace", "/property/townhouse",
++    "/property/semi-detached",
++)
+ LISTING_HREF_RE = re.compile(r"-\d{6,}\.htm(?:[?#]|$)")
+ 
+ 
+@@ -350,6 +368,11 @@ def _build_search_url(
+     """
+     f = filters or {}
+     kw_raw = f.get("keyword") or TYPE_SEARCH_KEYWORD[type_key]
++    # carpark is encoded as a free-text token appended to `q=` because
++    # Mudah has no dedicated query param. We do this BEFORE quoting so
++    # multi-word keywords stay readable in logs.
++    if f.get("carpark"):
++        kw_raw = f"{kw_raw} carpark"
+     parts: list[str] = [f"q={quote_plus(str(kw_raw))}", f"o={page}"]
+ 
+     bedrooms = f.get("bedrooms")
+@@ -399,7 +422,9 @@ def _extract_listing_urls(html: str) -> List[str]:
+         if not href.startswith(HOST):
+             continue
+         lower = href.lower()
+-        if any(b in lower for b in ("facebook", "twitter", "login", "signup", ".svg", ".png", ".jpg")):
++        if any(b in lower for b in _BAD_HREF_KEYWORDS):
++            continue
++        if any(fp in lower for fp in _FAKE_PAGES):
+             continue
+         if not LISTING_HREF_RE.search(lower):
+             continue
+@@ -420,14 +445,19 @@ def _extract_listing_urls(html: str) -> List[str]:
+             if href in seen:
+                 continue
+             lower = href.lower()
+-            if any(b in lower for b in ("facebook", "twitter", "login", "signup", ".svg", ".png", ".jpg")):
++            if any(b in lower for b in _BAD_HREF_KEYWORDS):
++                continue
++            if any(fp in lower for fp in _FAKE_PAGES):
+                 continue
+             seen.add(href)
+             urls.append(href)
+     return urls
+ 
+ 
+-_PRICE_RE = re.compile(r"rm[\s\u00a0]*([\d.,]+)", re.I)
++# K/M-aware: matches "RM 1.2M", "RM 550K", "RM 1,200,000". The `rm` prefix
++# is REQUIRED so we never pick up a stray "3" from "3 bedroom".
++_PRICE_RE = re.compile(r"rm[\s\u00a0]*([\d.,]+)\s*([km])?", re.I)
++_PRICE_SUFFIX = {"k": 1_000, "m": 1_000_000}
+ _BED_RE = re.compile(r"(\d+)\s*(?:bed|bedroom|bedrooms)", re.I)
+ _BATH_RE = re.compile(r"(\d+)\s*(?:bath|bathroom|bathrooms)", re.I)
+ _SQFT_RE = re.compile(r"([\d,]+)\s*sq\s*\.?\s*ft", re.I)
+@@ -438,9 +468,13 @@ def _clean_price(text: str) -> Optional[float]:
+     if not m:
+         return None
+     try:
+-        return float(m.group(1).replace(",", ""))
++        val = float(m.group(1).replace(",", ""))
+     except ValueError:
+         return None
++    suffix = (m.group(2) or "").lower()
++    if suffix in _PRICE_SUFFIX:
++        val *= _PRICE_SUFFIX[suffix]
++    return val
+ 
+ 
+ def _extract_next_data(soup: BeautifulSoup) -> Optional[Dict]:
+diff --git a/backend/scraper/playwright_pool.py b/backend/scraper/playwright_pool.py
+index f98f939..96b6487 100644
+--- a/backend/scraper/playwright_pool.py
++++ b/backend/scraper/playwright_pool.py
+@@ -101,6 +101,7 @@ class PlaywrightPool:
+             *,
+             goto_timeout_ms: int = 20000,
+             anchor_wait_ms: int = 5000,
++            capture_listing_urls: bool = False,
+     ) -> str:
+         """Fetch URL with the shared browser. Returns HTML or "" on failure.
+ 
+@@ -113,6 +114,25 @@ class PlaywrightPool:
+         await self._ensure_started()
+         async with self._sem:
+             page = await self._context.new_page()
++            # Network-response capture for dynamically-injected listing URLs
++            # that __NEXT_DATA__ does not expose. Listener MUST be attached
++            # BEFORE goto() to avoid missing early XHR/fetch responses.
++            captured: list[str] = []
++            if capture_listing_urls:
++                import re as _re
++                _LRE = _re.compile(
++                    r"https?://www\.mudah\.my/[\w\-/]+?-\d{6,}\.htm",
++                    _re.IGNORECASE,
++                )
++                def _on_response(resp) -> None:
++                    try:
++                        u = resp.url
++                        if "mudah.my" in u and ".htm" in u:
++                            for m in _LRE.findall(u):
++                                captured.append(m)
++                    except Exception:
++                        pass
++                page.on("response", _on_response)
+             try:
+                 try:
+                     await page.goto(url, wait_until="domcontentloaded",
+@@ -129,11 +149,20 @@ class PlaywrightPool:
+                     # Soft timeout — fall through and return current DOM.
+                     pass
+                 try:
+-                    return await page.content()
++                    html = await page.content()
+                 except Exception as e:
+                     logger.warning("[playwright_pool] content fail %s: %s",
+                                    url, str(e)[:120])
+                     return ""
++                if capture_listing_urls and captured:
++                    # Append unique captured URLs as a comment block so the
++                    # downstream _LISTING_HTML_RE sweep picks them up. We use
++                    # an HTML comment to avoid corrupting BeautifulSoup parsing.
++                    uniq = list(dict.fromkeys(captured))
++                    logger.info("[playwright_pool] captured %d listing URLs via network",
++                                len(uniq))
++                    html += "\n<!-- network-captured: " + " ".join(uniq) + " -->\n"
++                return html
+             finally:
+                 try:
+                     await page.close()
+diff --git a/backend/scraper/seeder.py b/backend/scraper/seeder.py
+index b997ec8..1482094 100644
+--- a/backend/scraper/seeder.py
++++ b/backend/scraper/seeder.py
+@@ -26,6 +26,7 @@ from typing import Awaitable, Callable, Dict, List, Optional
+ from curl_cffi.requests import AsyncSession
+ 
+ from . import storage
++from .query_variants import generate_query_variants
+ from .types_quota import (
+     MAX_PER_REGION, MY_REGIONS, TYPE_QUOTA,
+ )
+@@ -38,6 +39,9 @@ from .mudah_scraper import (
+ # Realtime mode hard cap: stop scraping once this many listing URLs have
+ # been collected (across all regions/types) and hand off to ranking.
+ REALTIME_URL_CAP = 100
++# Floor below which we trigger progressive variant relaxation
++# (drop carpark → drop bedrooms → widen price ±20%). Set to 0 to disable.
++MIN_REALTIME_PER_REGION = 10
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -263,6 +267,46 @@ async def fetch_realtime_into_tempo(
+                 "[realtime] %s: +%d new, tempo_total=%d, budget_remaining=%d, filter=%s",
+                 region, total_new, len(rows), _URL_BUDGET.remaining, live_filter,
+             )
++
++            # ── Progressive variant retry ───────────────────────────────
++            # When live_filter is active and the per-region yield is below
++            # MIN_REALTIME_PER_REGION, fan out across relaxed variants in
++            # order. Stops as soon as we hit the floor OR exhaust variants
++            # OR exhaust the global URL budget.
++            if (
++                live_filter
++                and len(rows) < MIN_REALTIME_PER_REGION
++                and not _URL_BUDGET.exhausted
++            ):
++                variants = generate_query_variants(live_filter)[1:]  # skip base
++                for vi, variant in enumerate(variants, start=1):
++                    if _URL_BUDGET.exhausted:
++                        break
++                    logger.info(
++                        "[realtime] %s: variant retry %d/%d filter=%s",
++                        region, vi, len(variants), variant,
++                    )
++                    v_sem = asyncio.Semaphore(REGION_TYPE_CONCURRENCY)
++                    async def _v_bounded(t: str, q: int,
++                                          _region: str = region,
++                                          _variant: Dict = variant) -> int:
++                        async with v_sem:
++                            return await _scrape_one_type_persist(
++                                _region, session_id, t, q,
++                                filters=_variant, client=shared_client,
++                            )
++                    await asyncio.gather(
++                        *[_v_bounded(t, q) for t, q in type_plan],
++                        return_exceptions=True,
++                    )
++                    rows = storage.read_tempo(region, session_id)
++                    counts[region] = len(rows)
++                    if len(rows) >= MIN_REALTIME_PER_REGION:
++                        logger.info(
++                            "[realtime] %s: variant %d satisfied floor (%d rows)",
++                            region, vi, len(rows),
++                        )
++                        break
+     finally:
+         # Always disable the budget so non-realtime / subsequent runs are
+         # never accidentally throttled by leftover state.
+diff --git a/backend/scraper/storage.py b/backend/scraper/storage.py
+index c1faaf1..44c5fd8 100644
+--- a/backend/scraper/storage.py
++++ b/backend/scraper/storage.py
+@@ -226,16 +226,29 @@ def append_longterm(region: str, rows: Iterable[Dict]) -> int:
+     new columns without truncation; new wide rows preserve every field)."""
+     new_records: List[Dict] = []
+     seen_in_batch: set = set()
++    dropped_invalid = 0
+     for r in rows:
+         url = r.get("listing_url") or r.get("canonical_url")
+         if not url or url in seen_in_batch:
+             continue
+         seen_in_batch.add(url)
++        # ADDITIVE quality gate: title sanity + price plausibility.
++        # _is_complete (upstream in scraper) still owns mandatory-field
++        # enforcement; this only catches the residual junk.
++        if not is_valid_row(r):
++            dropped_invalid += 1
++            continue
+         # Mirror the URL into both keys for downstream compat.
+         rec = dict(r)
+         rec.setdefault("listing_url", url)
+         rec.setdefault("canonical_url", url)
+         new_records.append(rec)
++    if dropped_invalid:
++        import logging as _lg
++        _lg.getLogger(__name__).info(
++            "[storage] append_longterm region=%s dropped %d invalid rows",
++            region, dropped_invalid,
++        )
+     if not new_records:
+         return 0
+ 
+diff --git a/backend/scraper/query_variants.py b/backend/scraper/query_variants.py
+new file mode 100644
+--- /dev/null
++++ b/backend/scraper/query_variants.py
+@@ -0,0 +1,62 @@
++"""
++scraper/query_variants.py
++─────────────────────────
++Progressive constraint relaxation for live-search retries.
++
++When fetch_realtime_into_tempo() returns a thin result set, the caller can
++fan out across these variants instead of immediately falling back to demo
++data. Order is strictly monotonic: each variant relaxes ONE more constraint
++than the previous one.
++
++Inspired by Hackathon-67/scraper/live/search_fallback.py but:
++  - Operates on huh's filter shape (house_type/bedrooms/carpark/min_price/max_price)
++    rather than the hack repo's `budget` scalar.
++  - Returns deep copies, never mutates the input.
++  - Caller decides when to stop (e.g. after enough rows collected).
++"""
++from __future__ import annotations
++
++from copy import deepcopy
++from typing import Any, Dict, List
++
++
++def generate_query_variants(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
++    """Return progressively-relaxed filter variants.
++
++    Variant order:
++      0. As-given (always first; lets the caller treat the list uniformly).
++      1. Drop `carpark` constraint.
++      2. Drop `bedrooms` constraint.
++      3. Drop both carpark + bedrooms AND widen price band by 20%.
++
++    `house_type` is NEVER relaxed — switching it would silently return a
++    different category of property.
++    """
++    base = deepcopy(filters or {})
++    variants: List[Dict[str, Any]] = [base]
++
++    if base.get("carpark"):
++        v = deepcopy(base)
++        v.pop("carpark", None)
++        variants.append(v)
++
++    if base.get("bedrooms") is not None:
++        v = deepcopy(base)
++        v.pop("bedrooms", None)
++        variants.append(v)
++
++    # Final widest variant — only emit when it actually differs from base.
++    v_wide = deepcopy(base)
++    v_wide.pop("carpark", None)
++    v_wide.pop("bedrooms", None)
++    for key, factor in (("min_price", 0.8), ("max_price", 1.2)):
++        val = v_wide.get(key)
++        try:
++            if val is not None and float(val) > 0:
++                v_wide[key] = float(val) * factor
++        except (TypeError, ValueError):
++            pass
++    if v_wide != base and v_wide not in variants:
++        variants.append(v_wide)
++
++    return variants
+diff --git a/backend/scraper/listing_validator.py b/backend/scraper/listing_validator.py
+new file mode 100644
+--- /dev/null
++++ b/backend/scraper/listing_validator.py
+@@ -0,0 +1,62 @@
++"""
++scraper/listing_validator.py
++────────────────────────────
++ADDITIVE quality gate. Runs AFTER the existing _is_complete() check, never
++replaces it. Drops rows that pass the mandatory-fields check but are still
++obviously junk (placeholder titles, prices outside plausible ranges).
++
++Adapted from Hackathon-67/scraper/utils/listing_validator.py:
++  - is_valid_url is INTENTIONALLY OMITTED because huh's LISTING_HREF_RE
++    (≥6-digit ID requirement) is strictly stricter than the hack repo's
++    `/d+\\.htm` pattern. Re-introducing the looser check would regress.
++  - Price bounds are configurable so unusual but real listings
++    (e.g. RM 450 shared rooms) can be allowed by tuning the floor.
++"""
++from __future__ import annotations
++
++from typing import Any, Iterable, Tuple
++
++_BAD_TITLES = frozenset({
++    "", "www.mudah.my", "mudah.my", "loading", "untitled",
++    "property", "real estate", "for sale", "for rent",
++})
++
++# Sale floor is generous (RM 10k) — covers tiny rural lots; rent ceiling
++# 30k caters to luxury KL penthouses. Tune via overrides in storage.
++DEFAULT_SALE_RANGE: Tuple[float, float] = (10_000.0, 100_000_000.0)
++DEFAULT_RENT_RANGE: Tuple[float, float] = (200.0, 30_000.0)
++
++
++def is_valid_title(title: Any) -> bool:
++    if not isinstance(title, str):
++        return False
++    t = title.strip().lower()
++    if t in _BAD_TITLES:
++        return False
++    return len(t) > 5
++
++
++def is_valid_price(price: Any, listing_type: str = "sale") -> bool:
++    """`listing_type` ∈ {"sale", "rent"}. None price → True (caller may
++    have intentionally left it null and dropped via _is_complete already)."""
++    if price is None:
++        return True
++    try:
++        v = float(price)
++    except (TypeError, ValueError):
++        return False
++    lo, hi = (DEFAULT_RENT_RANGE if str(listing_type).lower().startswith("rent")
++              else DEFAULT_SALE_RANGE)
++    return lo <= v <= hi
++
++
++def is_valid_row(row: dict) -> bool:
++    """Convenience: apply both checks. Used as a filter() predicate."""
++    if not is_valid_title(row.get("title")):
++        return False
++    listing_type = row.get("listing_type") or row.get("property_action") or "sale"
++    return is_valid_price(row.get("price"), listing_type)
++
++
++def filter_valid(rows: Iterable[dict]) -> list:
++    return [r for r in rows if is_valid_row(r)]
+diff --git a/backend/scraper/tests/test_optimizations.py b/backend/scraper/tests/test_optimizations.py
+new file mode 100644
+--- /dev/null
++++ b/backend/scraper/tests/test_optimizations.py
+@@ -0,0 +1,112 @@
++"""Golden-fixture regression tests for the scraper optimisations.
++
++Run: python -m pytest backend/scraper/tests/test_optimizations.py -v
++"""
++from __future__ import annotations
++
++import sys
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[3]
++sys.path.insert(0, str(ROOT))
++
++from backend.scraper.mudah_scraper import _clean_price, _build_search_url
++from backend.scraper.listing_validator import (
++    is_valid_title, is_valid_price, is_valid_row,
++)
++from backend.scraper.query_variants import generate_query_variants
++
++
++# ── _clean_price K/M ────────────────────────────────────────────────────
++def test_price_plain():
++    assert _clean_price("RM 1,200,000") == 1_200_000.0
++
++def test_price_k_suffix():
++    assert _clean_price("RM 550K") == 550_000.0
++
++def test_price_m_suffix():
++    assert _clean_price("RM 1.2M") == 1_200_000.0
++
++def test_price_lowercase_suffix():
++    assert _clean_price("rm 850k") == 850_000.0
++
++def test_price_no_prefix_rejected():
++    # Never extract a number that lacks the `rm` prefix — guards against
++    # picking up "3" from "3 bedroom apartment".
++    assert _clean_price("3 bedroom apartment") is None
++
++def test_price_garbage_returns_none():
++    assert _clean_price("call for price") is None
++
++
++# ── _build_search_url carpark ───────────────────────────────────────────
++def test_build_url_no_carpark():
++    url = _build_search_url("kuala-lumpur", "condo", 1, filters={})
++    assert "carpark" not in url
++
++def test_build_url_with_carpark():
++    url = _build_search_url(
++        "kuala-lumpur", "condo", 1,
++        filters={"carpark": True, "keyword": "condo"},
++    )
++    # carpark token appended to the q= free-text query.
++    assert "carpark" in url
++    assert "q=condo+carpark" in url
++
++
++# ── ListingValidator ────────────────────────────────────────────────────
++def test_title_rejects_junk():
++    for bad in ("", "loading", "mudah.my", "Property"):
++        assert not is_valid_title(bad), bad
++
++def test_title_accepts_real():
++    assert is_valid_title("3-bedroom condo in Mont Kiara")
++
++def test_price_bounds_sale():
++    assert is_valid_price(450_000, "sale")
++    assert not is_valid_price(1_000, "sale")          # below floor
++
++def test_price_bounds_rent():
++    assert is_valid_price(1_800, "rent")
++    assert not is_valid_price(35_000, "rent")         # above ceiling
++
++def test_price_null_passthrough():
++    # None is OK at this layer — upstream _is_complete owns mandatory enforcement.
++    assert is_valid_price(None, "sale")
++
++def test_is_valid_row_composite():
++    assert is_valid_row({"title": "Condo at KLCC", "price": 850_000,
++                         "listing_type": "sale"})
++    assert not is_valid_row({"title": "loading", "price": 850_000,
++                             "listing_type": "sale"})
++
++
++# ── query_variants progressive relaxation ───────────────────────────────
++def test_variants_baseline_only():
++    v = generate_query_variants({"house_type": "condo"})
++    assert v == [{"house_type": "condo"}]
++
++def test_variants_drops_carpark_first():
++    base = {"house_type": "condo", "carpark": True, "bedrooms": 3}
++    variants = generate_query_variants(base)
++    assert variants[0] == base
++    assert "carpark" not in variants[1]
++    assert variants[1].get("bedrooms") == 3
++
++def test_variants_drops_bedrooms_next():
++    base = {"house_type": "condo", "carpark": True, "bedrooms": 3}
++    variants = generate_query_variants(base)
++    # Find the variant that drops bedrooms but kept carpark-already-removed.
++    assert any("bedrooms" not in v for v in variants[2:])
++
++def test_variants_widens_price():
++    base = {"house_type": "condo", "min_price": 500_000, "max_price": 800_000}
++    variants = generate_query_variants(base)
++    wide = variants[-1]
++    assert wide["min_price"] == 400_000.0
++    assert wide["max_price"] == 960_000.0
++
++def test_variants_never_relaxes_house_type():
++    base = {"house_type": "bungalow", "carpark": True, "bedrooms": 5}
++    for v in generate_query_variants(base):
++        assert v.get("house_type") == "bungalow"

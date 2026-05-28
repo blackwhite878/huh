@@ -70,6 +70,13 @@ def _regex_house_type(text: str) -> Optional[str]:
     return best[1]
 
 
+_CARPARK_RE = re.compile(r"(?:car\s*park|parking|carpark|停車|停车)", re.I)
+
+
+def _regex_carpark(text: str) -> bool:
+    return bool(_CARPARK_RE.search(text or ""))
+
+
 def _regex_bedrooms(text: str) -> Optional[int]:
     for pat in _BEDROOM_PATTERNS:
         m = pat.search(text)
@@ -194,6 +201,7 @@ async def build_live_filter(session_id: str) -> Dict[str, Any]:
     regex_hint: Dict[str, Any] = {
         "house_type": _regex_house_type(text) if text else None,
         "bedrooms":   _regex_bedrooms(text)   if text else None,
+        "carpark":    _regex_carpark(text)    if text else False,
     }
 
     llm_hint: Dict[str, Any] = {}
@@ -212,6 +220,8 @@ async def build_live_filter(session_id: str) -> Dict[str, Any]:
         out["keyword"]    = TYPE_SEARCH_KEYWORD.get(house_type)
     if bedrooms is not None:
         out["bedrooms"] = bedrooms
+    if regex_hint.get("carpark"):
+        out["carpark"] = True
     if lo is not None:
         out["min_price"] = lo
     if hi is not None:
