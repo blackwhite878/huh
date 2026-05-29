@@ -193,6 +193,25 @@ async def run_pure_fetch_realtime(
     """
     _configure_console_logging()
 
+    # Silence harmless Playwright background-callback noise during shutdown.
+    # When the shared Chromium context is torn down, in-flight `page.on(...)`
+    # response listeners can resolve into a `TargetClosedError` that asyncio
+    # surfaces as "Future exception was never retrieved". Those futures are
+    # not awaited by us (Playwright owns them), so we install a loop-level
+    # exception handler that drops *only* that specific class while letting
+    # every other exception propagate to the default handler.
+    def _silence_target_closed(loop, ctx):  # noqa: ANN001
+        exc = ctx.get("exception")
+        if exc is not None:
+            name = type(exc).__name__
+            if name in {"TargetClosedError", "CancelledError"}:
+                return
+        loop.default_exception_handler(ctx)
+    try:
+        asyncio.get_running_loop().set_exception_handler(_silence_target_closed)
+    except RuntimeError:
+        pass
+
     regions = list(regions) if regions else list(MY_REGIONS)
     type_plan: List[tuple[str, int]] = (
         [(t, TYPE_QUOTA[t]) for t in types if t in TYPE_QUOTA]
@@ -225,11 +244,30 @@ async def run_pure_fetch_realtime(
             async def _do_type(type_key: str, quota: int) -> None:
                 async with type_sem:
                     cell_t0 = time.perf_counter()
+                    streamed = 0  # rows persisted incrementally via on_row
+
+                    async def _sink(row: Dict) -> None:
+                        """Per-row sink: flush this single row to the long-term
+                        per-region CSV the instant a detail page finishes.
+                        Survives a kill/Ctrl-C mid-cell because storage.append_longterm
+                        fsyncs on each call and dedups by listing_url."""
+                        nonlocal streamed
+                        try:
+                            written = storage.append_longterm(region, [row])
+                            if written:
+                                streamed += written
+                        except Exception as _e:
+                            logger.warning(
+                                "[pure_fetch_realtime] %s/%s row sink fail: %r",
+                                region, type_key, _e,
+                            )
+
                     try:
                         rows = await scrape_region_type(
                             region, type_key, quota,
                             filters=None,
                             client=shared_client,
+                            on_row=_sink,
                         )
                     except Exception as e:
                         logger.warning(
@@ -241,21 +279,17 @@ async def run_pure_fetch_realtime(
                     per_type[type_key] = len(rows)
 
                     # ── INCREMENTAL LONG-TERM FLUSH ─────────────────────
-                    # Persist this cell's rows to the long-term per-region
-                    # CSV immediately, instead of buffering until the whole
-                    # region finishes. Ensures partial progress is durable
-                    # even if the process is killed mid-run (matches user
-                    # expectation: "save in long term data" while running,
-                    # not only at end-of-region). storage.append_longterm
-                    # is internally guarded by a threading.Lock + dedups
-                    # by listing_url, so concurrent sibling _do_type calls
-                    # for the same region are safe.
+                    # Most rows were streamed via _sink as soon as each
+                    # detail page parsed (so partial progress survives
+                    # process kills). This trailing append is a defensive
+                    # no-op for any row that bypassed the sink path; the
+                    # internal dedupe guarantees no double-write.
                     written = storage.append_longterm(region, rows) if rows else 0
-                    per_type_written[type_key] = written
+                    per_type_written[type_key] = streamed + written
                     total_now = storage.longterm_count(region)
                     logger.info(
-                        "[pure_fetch_realtime]   %s/%s rows=%d written=%d longterm_total=%d elapsed=%.2fs",
-                        region, type_key, len(rows), written, total_now, elapsed,
+                        "[pure_fetch_realtime]   %s/%s rows=%d streamed=%d tail_written=%d longterm_total=%d elapsed=%.2fs",
+                        region, type_key, len(rows), streamed, written, total_now, elapsed,
                     )
 
                     # Refresh the clean aggregate CSV after every cell so
@@ -267,6 +301,7 @@ async def run_pure_fetch_realtime(
                             "[pure_fetch_realtime] aggregate refresh failed after %s/%s: %r",
                             region, type_key, agg_err,
                         )
+
 
             await asyncio.gather(
                 *[_do_type(t, q) for t, q in type_plan],

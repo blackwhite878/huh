@@ -1152,6 +1152,7 @@ async def scrape_region_type(
         target_count: int,
         *,
         on_progress: Optional[Callable[[str], Awaitable[None]]] = None,
+        on_row: Optional[Callable[[Dict], Awaitable[None]]] = None,
         filters: Optional[Dict] = None,
         skip_playwright: bool = False,
         enforce_mandatory: bool = True,
@@ -1401,6 +1402,18 @@ async def scrape_region_type(
                 row = await coro
                 if row and row.get("canonical_url"):
                     collected.append(row)
+                    if on_row is not None:
+                        # Stream this row to the caller (e.g. for incremental
+                        # CSV flush) BEFORE the cell finishes. Swallow errors
+                        # so a sink failure never aborts the scrape.
+                        try:
+                            await on_row(row)
+                        except Exception as _sink_err:
+                            print(
+                                f"[scrape] on_row sink raised: "
+                                f"{type(_sink_err).__name__}: {_sink_err}",
+                                flush=True,
+                            )
                 else:
                     dropped_incomplete += 1
                 if not BUDGET.enabled and len(collected) >= target_count:
