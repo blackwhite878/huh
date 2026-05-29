@@ -27,7 +27,7 @@ HOST = "https://www.mudah.my"
 # Generic fallback path when TYPE_URL_PATH doesn't have a per-type entry
 # (or when a per-type path 404s and we retry the generic one).
 LIST_PATH_TEMPLATE = "/{region}/properties-for-sale"
-MAX_PAGES_PER_QUERY = 8
+MAX_PAGES_PER_QUERY = 12
 # Concurrency bumped 2× per spec. Anti-bot risk scales linearly; ScraperBanned
 # already triggers Playwright fallback so the upper bound is bounded.
 PER_HOST_CONCURRENCY = 8
@@ -1183,7 +1183,7 @@ async def scrape_region_type(
     host_sem = asyncio.Semaphore(PER_HOST_CONCURRENCY)
     detail_sem = asyncio.Semaphore(DETAIL_CONCURRENCY)
 
-    list_use_playwright = False
+    list_use_playwright = False  # kept for backward-compat; no longer toggled (see pagination loop)
     collected: List[Dict] = []
     dropped_incomplete = 0
     seen_urls: set[str] = set()
@@ -1284,10 +1284,15 @@ async def scrape_region_type(
                 break
 
             html, source = await _list_fetch(page)
-            if source == "pw":
-                # Detail fetches in this cell will now also use Playwright,
-                # mirroring previous behaviour when list was banned.
-                list_use_playwright = True
+            # NOTE: We intentionally do NOT flip a cell-wide "use Playwright
+            # for all details" switch when a list page falls back to PW.
+            # That switch (previously `list_use_playwright = True`) shoved
+            # every detail URL in this cell through the 6-slot Chromium pool,
+            # which is what triggered the wave of
+            # `[playwright_pool] goto fail ... Timeout` lines in the log.
+            # The per-detail policy already has its own ladder
+            # (3× curl_cffi → 1× Playwright fallback), so detail fetches
+            # can independently use curl even when list scraping needed PW.
 
             if not html:
                 print(
@@ -1326,8 +1331,13 @@ async def scrape_region_type(
                 await on_progress(f"{region}/{type_key} page {page}: +{len(new)} (total {len(listing_urls)})")
             if BUDGET.exhausted:
                 break
-            if not BUDGET.enabled and len(listing_urls) >= target_count * 2:
-                break
+            # NOTE: removed the early `len(listing_urls) >= target_count * 2`
+            # break. With detail-page timeouts dropping a large fraction of
+            # rows, a 2× URL pool was not enough headroom to fill `target_count`
+            # kept rows — cells finished with kept << quota and the per-region
+            # 100-row floor was never reached. We now pull every available
+            # list page (up to MAX_PAGES_PER_QUERY) so the detail stage has
+            # enough inventory to absorb timeouts and still hit quota.
 
         async def _fetch_html_once(u: str, *, force_playwright: bool) -> Optional[str]:
             try:

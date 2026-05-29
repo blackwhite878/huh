@@ -309,9 +309,15 @@ async def run_pure_fetch_realtime(
             )
 
             total_now = storage.longterm_count(region)
-            counts[region] = per_type
+            # Report CSV-truth counts (per_type_written = streamed sink writes
+            # + trailing tail writes returned by storage.append_longterm), NOT
+            # the in-memory `len(rows)` from scrape_region_type. Detail-page
+            # timeouts and dedupe drops can make len(rows) > rows-actually-
+            # persisted, which previously inflated the summary and made the
+            # run look like it hit quota when the CSV had fewer rows.
+            counts[region] = dict(per_type_written)
             logger.info(
-                "[pure_fetch_realtime] %s ◀ done written_per_type=%s longterm_total=%d elapsed=%.2fs per_type=%s",
+                "[pure_fetch_realtime] %s ◀ done written_per_type=%s longterm_total=%d elapsed=%.2fs in_memory_per_type=%s",
                 region, per_type_written, total_now,
                 time.perf_counter() - region_t0, per_type,
             )

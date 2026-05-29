@@ -1,59 +1,132 @@
-diff --git a/backend/scraper/listing_validator.py b/backend/scraper/listing_validator.py
-index 9774f99..eb48d31 100644
---- a/backend/scraper/listing_validator.py
-+++ b/backend/scraper/listing_validator.py
-@@ -45,7 +45,9 @@ def is_valid_price(price: Any, listing_type: str = "sale") -> bool:
-         v = float(price)
-     except (TypeError, ValueError):
-         return False
--    lo, hi = (DEFAULT_RENT_RANGE if str(listing_type).lower().startswith("rent")
-+    # Accept both short keys ("sale"/"rent") and the scraper's human strings
-+    # ("For Sale"/"For Rent"); plain `startswith("rent")` would miss the latter.
-+    lo, hi = (DEFAULT_RENT_RANGE if "rent" in str(listing_type).lower()
-               else DEFAULT_SALE_RANGE)
-     return lo <= v <= hi
+--- a/backend/scraper/mudah_scraper.py
++++ b/backend/scraper/mudah_scraper.py
+@@ -27,7 +27,7 @@
+ # Generic fallback path when TYPE_URL_PATH doesn't have a per-type entry
+ # (or when a per-type path 404s and we retry the generic one).
+ LIST_PATH_TEMPLATE = "/{region}/properties-for-sale"
+-MAX_PAGES_PER_QUERY = 8
++MAX_PAGES_PER_QUERY = 12
+ # Concurrency bumped 2× per spec. Anti-bot risk scales linearly; ScraperBanned
+ # already triggers Playwright fallback so the upper bound is bounded.
+ PER_HOST_CONCURRENCY = 8
+@@ -1183,7 +1183,7 @@
+     host_sem = asyncio.Semaphore(PER_HOST_CONCURRENCY)
+     detail_sem = asyncio.Semaphore(DETAIL_CONCURRENCY)
  
-@@ -54,7 +56,14 @@ def is_valid_row(row: dict) -> bool:
-     """Convenience: apply both checks. Used as a filter() predicate."""
-     if not is_valid_title(row.get("title")):
-         return False
--    listing_type = row.get("listing_type") or row.get("property_action") or "sale"
-+    # mudah_scraper._parse_detail emits `transaction_type` ("For Sale"/"For Rent");
-+    # legacy/hack-repo rows may instead carry `listing_type` or `property_action`.
-+    listing_type = (
-+        row.get("listing_type")
-+        or row.get("property_action")
-+        or row.get("transaction_type")
-+        or "sale"
-+    )
-     return is_valid_price(row.get("price"), listing_type)
+-    list_use_playwright = False
++    list_use_playwright = False  # kept for backward-compat; no longer toggled (see pagination loop)
+     collected: List[Dict] = []
+     dropped_incomplete = 0
+     seen_urls: set[str] = set()
+@@ -1284,10 +1284,15 @@
+                 break
+ 
+             html, source = await _list_fetch(page)
+-            if source == "pw":
+-                # Detail fetches in this cell will now also use Playwright,
+-                # mirroring previous behaviour when list was banned.
+-                list_use_playwright = True
++            # NOTE: We intentionally do NOT flip a cell-wide "use Playwright
++            # for all details" switch when a list page falls back to PW.
++            # That switch (previously `list_use_playwright = True`) shoved
++            # every detail URL in this cell through the 6-slot Chromium pool,
++            # which is what triggered the wave of
++            # `[playwright_pool] goto fail ... Timeout` lines in the log.
++            # The per-detail policy already has its own ladder
++            # (3× curl_cffi → 1× Playwright fallback), so detail fetches
++            # can independently use curl even when list scraping needed PW.
+ 
+             if not html:
+                 print(
+@@ -1326,8 +1331,13 @@
+                 await on_progress(f"{region}/{type_key} page {page}: +{len(new)} (total {len(listing_urls)})")
+             if BUDGET.exhausted:
+                 break
+-            if not BUDGET.enabled and len(listing_urls) >= target_count * 2:
+-                break
++            # NOTE: removed the early `len(listing_urls) >= target_count * 2`
++            # break. With detail-page timeouts dropping a large fraction of
++            # rows, a 2× URL pool was not enough headroom to fill `target_count`
++            # kept rows — cells finished with kept << quota and the per-region
++            # 100-row floor was never reached. We now pull every available
++            # list page (up to MAX_PAGES_PER_QUERY) so the detail stage has
++            # enough inventory to absorb timeouts and still hit quota.
+ 
+         async def _fetch_html_once(u: str, *, force_playwright: bool) -> Optional[str]:
+             try:
+--- a/backend/scraper/playwright_pool.py
++++ b/backend/scraper/playwright_pool.py
+@@ -48,7 +48,16 @@
+ )
+ 
+ # Cap concurrent pages opened against the same browser.
+-_MAX_CONCURRENT_PAGES = 4
++# Bumped 4 → 6: pure_fetch runs up to 24 cells in parallel
++# (4 regions × 6 types) and a 4-slot queue starved goto() so badly
++# that the 20s timeout fired before navigation even committed.
++_MAX_CONCURRENT_PAGES = 6
++# One retry on goto failure with a short backoff. The previous code
++# returned "" on the first timeout, which is what produced the wave
++# of `[playwright_pool] goto fail ... Timeout 20000ms exceeded.`
++# lines and the resulting `kept=0` cells.
++_GOTO_RETRIES = 1
++_GOTO_RETRY_BACKOFF_SEC = 1.5
  
  
-diff --git a/backend/scraper/storage.py b/backend/scraper/storage.py
-index 44c5fd8..007a6cb 100644
---- a/backend/scraper/storage.py
-+++ b/backend/scraper/storage.py
-@@ -22,6 +22,7 @@ from typing import Any, Dict, Iterable, List, Optional, Union
- import pandas as pd
+ class PlaywrightPool:
+@@ -99,7 +108,7 @@
+             self,
+             url: str,
+             *,
+-            goto_timeout_ms: int = 20000,
++            goto_timeout_ms: int = 45000,
+             anchor_wait_ms: int = 5000,
+             capture_listing_urls: bool = False,
+     ) -> str:
+@@ -134,12 +143,21 @@
+                         pass
+                 page.on("response", _on_response)
+             try:
+-                try:
+-                    await page.goto(url, wait_until="domcontentloaded",
+-                                    timeout=goto_timeout_ms)
+-                except Exception as e:
++                last_err: Optional[Exception] = None
++                for attempt in range(_GOTO_RETRIES + 1):
++                    try:
++                        await page.goto(url, wait_until="domcontentloaded",
++                                        timeout=goto_timeout_ms)
++                        last_err = None
++                        break
++                    except Exception as e:
++                        last_err = e
++                        if attempt < _GOTO_RETRIES:
++                            await asyncio.sleep(_GOTO_RETRY_BACKOFF_SEC * (attempt + 1))
++                            continue
++                if last_err is not None:
+                     logger.warning("[playwright_pool] goto fail %s: %s",
+-                                   url, str(e)[:120])
++                                   url, str(last_err)[:120])
+                     return ""
+                 try:
+                     await page.wait_for_selector(
+--- a/backend/scraper/pure_fetch_realtime.py
++++ b/backend/scraper/pure_fetch_realtime.py
+@@ -309,9 +309,15 @@
+             )
  
- from schemas import ScrapedProperty
-+from .listing_validator import is_valid_row
- 
- BACKEND_DIR = Path(__file__).resolve().parent.parent
- DATA_DIR    = BACKEND_DIR / "data"     / "states"
-diff --git a/backend/scraper/tests/test_scraper.py b/backend/scraper/tests/test_scraper.py
-index 6f96081..331252e 100644
---- a/backend/scraper/tests/test_scraper.py
-+++ b/backend/scraper/tests/test_scraper.py
-@@ -113,7 +113,10 @@ def test_parse_detail_falls_back_to_dom_selectors():
- def _row(url, **over):
-     base = {
-         "listing_url": url, "source": "mudah.my", "scraped_at": "2026-05-01T00:00:00Z",
--        "title": "t", "price": 100.0, "currency": "MYR",
-+        # title must pass is_valid_title (len>5, not in _BAD_TITLES)
-+        # price must pass is_valid_price for the default SALE range (>=10_000)
-+        "title": "Cozy Condo in Mont Kiara", "price": 850000.0, "currency": "MYR",
-+        "transaction_type": "For Sale",
-         "property_type": "condo", "region": "selangor",
-         "location": "x", "city": "x",
-         "bedrooms": 2, "bathrooms": 2,
+             total_now = storage.longterm_count(region)
+-            counts[region] = per_type
++            # Report CSV-truth counts (per_type_written = streamed sink writes
++            # + trailing tail writes returned by storage.append_longterm), NOT
++            # the in-memory `len(rows)` from scrape_region_type. Detail-page
++            # timeouts and dedupe drops can make len(rows) > rows-actually-
++            # persisted, which previously inflated the summary and made the
++            # run look like it hit quota when the CSV had fewer rows.
++            counts[region] = dict(per_type_written)
+             logger.info(
+-                "[pure_fetch_realtime] %s ◀ done written_per_type=%s longterm_total=%d elapsed=%.2fs per_type=%s",
++                "[pure_fetch_realtime] %s ◀ done written_per_type=%s longterm_total=%d elapsed=%.2fs in_memory_per_type=%s",
+                 region, per_type_written, total_now,
+                 time.perf_counter() - region_t0, per_type,
+             )

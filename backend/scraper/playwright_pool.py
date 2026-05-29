@@ -48,7 +48,16 @@ _DEFAULT_UA = (
 )
 
 # Cap concurrent pages opened against the same browser.
-_MAX_CONCURRENT_PAGES = 4
+# Bumped 4 → 6: pure_fetch runs up to 24 cells in parallel
+# (4 regions × 6 types) and a 4-slot queue starved goto() so badly
+# that the 20s timeout fired before navigation even committed.
+_MAX_CONCURRENT_PAGES = 6
+# One retry on goto failure with a short backoff. The previous code
+# returned "" on the first timeout, which is what produced the wave
+# of `[playwright_pool] goto fail ... Timeout 20000ms exceeded.`
+# lines and the resulting `kept=0` cells.
+_GOTO_RETRIES = 1
+_GOTO_RETRY_BACKOFF_SEC = 1.5
 
 
 class PlaywrightPool:
@@ -99,7 +108,7 @@ class PlaywrightPool:
             self,
             url: str,
             *,
-            goto_timeout_ms: int = 20000,
+            goto_timeout_ms: int = 45000,
             anchor_wait_ms: int = 5000,
             capture_listing_urls: bool = False,
     ) -> str:
@@ -134,12 +143,21 @@ class PlaywrightPool:
                         pass
                 page.on("response", _on_response)
             try:
-                try:
-                    await page.goto(url, wait_until="domcontentloaded",
-                                    timeout=goto_timeout_ms)
-                except Exception as e:
+                last_err: Optional[Exception] = None
+                for attempt in range(_GOTO_RETRIES + 1):
+                    try:
+                        await page.goto(url, wait_until="domcontentloaded",
+                                        timeout=goto_timeout_ms)
+                        last_err = None
+                        break
+                    except Exception as e:
+                        last_err = e
+                        if attempt < _GOTO_RETRIES:
+                            await asyncio.sleep(_GOTO_RETRY_BACKOFF_SEC * (attempt + 1))
+                            continue
+                if last_err is not None:
                     logger.warning("[playwright_pool] goto fail %s: %s",
-                                   url, str(e)[:120])
+                                   url, str(last_err)[:120])
                     return ""
                 try:
                     await page.wait_for_selector(
