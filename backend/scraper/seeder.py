@@ -356,9 +356,7 @@ async def fetch_pure_into_longterm(
         async with region_sem:
             type_sem = asyncio.Semaphore(max(1, per_region_concurrency))
             per_type: Dict[str, int] = {}
-            # Per-region in-memory buffer; flushed once below.
-            region_buffer: List[Dict] = []
-            buf_lock = asyncio.Lock()
+            per_type_written: Dict[str, int] = {}
 
             async def _do_type(type_key: str, quota: int) -> None:
                 async with type_sem:
@@ -372,28 +370,31 @@ async def fetch_pure_into_longterm(
                         logger.warning("[pure_fetch] %s/%s scrape raised: %r",
                                        region, type_key, e)
                         rows = []
-                    # Buffer instead of writing now. asyncio.Lock guards the
-                    # list against concurrent extends from sibling _do_type
-                    # tasks within the same region.
-                    if rows:
-                        async with buf_lock:
-                            region_buffer.extend(rows)
                     per_type[type_key] = len(rows)
-                    logger.info("[pure_fetch] %s/%s scraped=%d (buffered)",
-                                region, type_key, len(rows))
+                    # ── INCREMENTAL LONG-TERM FLUSH ─────────────────────
+                    # Persist per (region, type) immediately instead of
+                    # buffering until end-of-region. Trades the per-region
+                    # batch-write optimisation for durability: partial
+                    # progress survives Ctrl-C / OOM / network death. The
+                    # threading.Lock inside append_longterm serialises
+                    # concurrent writers to the same region CSV.
+                    written = storage.append_longterm(region, rows) if rows else 0
+                    per_type_written[type_key] = written
+                    logger.info(
+                        "[pure_fetch] %s/%s scraped=%d written=%d longterm_total=%d",
+                        region, type_key, len(rows), written,
+                        storage.longterm_count(region),
+                    )
 
             await asyncio.gather(
                 *[_do_type(t, q) for t, q in TYPE_QUOTA.items()],
                 return_exceptions=True,
             )
 
-            # Per-region flush: ONE CSV rewrite for the whole region.
-            written_total = storage.append_longterm(region, region_buffer) if region_buffer else 0
             counts[region] = per_type
-            total_now = storage.longterm_count(region)
             logger.info(
-                "[pure_fetch] %s flush: buffered=%d written=%d longterm_total=%d per_type=%s",
-                region, len(region_buffer), written_total, total_now, per_type,
+                "[pure_fetch] %s done: written_per_type=%s longterm_total=%d per_type=%s",
+                region, per_type_written, storage.longterm_count(region), per_type,
             )
 
     try:

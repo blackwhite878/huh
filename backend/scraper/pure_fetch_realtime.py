@@ -218,8 +218,7 @@ async def run_pure_fetch_realtime(
         async with region_sem:
             type_sem = asyncio.Semaphore(max(1, per_region_concurrency))
             per_type: Dict[str, int] = {}
-            buffer: List[Dict] = []
-            buf_lock = asyncio.Lock()
+            per_type_written: Dict[str, int] = {}
             region_t0 = time.perf_counter()
             logger.info("[pure_fetch_realtime] %s ▶ scraping %d types", region, len(type_plan))
 
@@ -240,27 +239,45 @@ async def run_pure_fetch_realtime(
                         rows = []
                     elapsed = time.perf_counter() - cell_t0
                     per_type[type_key] = len(rows)
-                    if rows:
-                        async with buf_lock:
-                            buffer.extend(rows)
+
+                    # ── INCREMENTAL LONG-TERM FLUSH ─────────────────────
+                    # Persist this cell's rows to the long-term per-region
+                    # CSV immediately, instead of buffering until the whole
+                    # region finishes. Ensures partial progress is durable
+                    # even if the process is killed mid-run (matches user
+                    # expectation: "save in long term data" while running,
+                    # not only at end-of-region). storage.append_longterm
+                    # is internally guarded by a threading.Lock + dedups
+                    # by listing_url, so concurrent sibling _do_type calls
+                    # for the same region are safe.
+                    written = storage.append_longterm(region, rows) if rows else 0
+                    per_type_written[type_key] = written
+                    total_now = storage.longterm_count(region)
                     logger.info(
-                        "[pure_fetch_realtime]   %s/%s rows=%d elapsed=%.2fs",
-                        region, type_key, len(rows), elapsed,
+                        "[pure_fetch_realtime]   %s/%s rows=%d written=%d longterm_total=%d elapsed=%.2fs",
+                        region, type_key, len(rows), written, total_now, elapsed,
                     )
+
+                    # Refresh the clean aggregate CSV after every cell so
+                    # the user can tail it during a long run.
+                    try:
+                        _write_clean_aggregate(regions)
+                    except Exception as agg_err:
+                        logger.warning(
+                            "[pure_fetch_realtime] aggregate refresh failed after %s/%s: %r",
+                            region, type_key, agg_err,
+                        )
 
             await asyncio.gather(
                 *[_do_type(t, q) for t, q in type_plan],
                 return_exceptions=True,
             )
 
-            # Realtime-style persistence: one append_longterm flush per
-            # region (pandas merge + listing_url dedup happens inside).
-            written = storage.append_longterm(region, buffer) if buffer else 0
             total_now = storage.longterm_count(region)
             counts[region] = per_type
             logger.info(
-                "[pure_fetch_realtime] %s ◀ flush buffered=%d written=%d longterm_total=%d elapsed=%.2fs per_type=%s",
-                region, len(buffer), written, total_now,
+                "[pure_fetch_realtime] %s ◀ done written_per_type=%s longterm_total=%d elapsed=%.2fs per_type=%s",
+                region, per_type_written, total_now,
                 time.perf_counter() - region_t0, per_type,
             )
 
