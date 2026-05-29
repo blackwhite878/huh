@@ -21,7 +21,9 @@ from typing import Any, Dict, Iterable, List, Optional, Union
 
 import pandas as pd
 
-from schemas import ScrapedProperty
+from schemas import ScrapedProperty  # type: ignore[import-not-found]
+
+from .listing_validator import is_valid_row
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR    = BACKEND_DIR / "data"     / "states"
@@ -196,7 +198,7 @@ def _read_csv_df(p: Path) -> pd.DataFrame:
     if not p.exists() or p.stat().st_size == 0:
         return pd.DataFrame(columns=CSV_FIELDS)
     # Read everything as string; we decode types ourselves.
-    df = pd.read_csv(p, dtype=str, keep_default_na=False, na_values=[""])
+    df = pd.read_csv(p, dtype=str, keep_default_na=False, na_values=[""])  # type: ignore[call-overload]
     return _normalize_alias_columns(df)
 
 
@@ -292,7 +294,12 @@ def tempo_path(region: str, session_id: str) -> Path:
     return TEMPO_DIR / f"{region}__{session_id}.json"
 
 
-def write_tempo(region: str, session_id: str, rows: List[Union[ScrapedProperty, Dict[str, Any]]]) -> Path:
+def write_tempo(
+    region: str,
+    session_id: str,
+    rows: List[Union[ScrapedProperty, Dict[str, Any]]],
+) -> Path:
+
     p = tempo_path(region, session_id)
     serialized = [r.model_dump() if hasattr(r, "model_dump") else dict(r) for r in rows]
     with _write_lock, p.open("w", encoding="utf-8") as f:
@@ -301,7 +308,12 @@ def write_tempo(region: str, session_id: str, rows: List[Union[ScrapedProperty, 
     return p
 
 
-def append_tempo(region: str, session_id: str, rows: List[Dict]) -> int:
+def append_tempo(
+    region: str,
+    session_id: str,
+    rows: List[Union[ScrapedProperty, Dict[str, Any]]],
+) -> int:
+
     """Append scraped dict rows into the session tempo JSON, dedup by URL."""
     existing = read_tempo(region, session_id)
     existing_urls = {r.get("listing_url") or r.get("canonical_url")
