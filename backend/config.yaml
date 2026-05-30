@@ -1,7 +1,7 @@
 llm:
   # Chutes AI model id. List available: GET https://llm.chutes.ai/v1/models
   # Old "deepseek-ai/DeepSeek-V3-0324" was retired → 404.
-  model: deepseek-ai/DeepSeek-V3.2-TEE
+  model: gemini-2.5-flash
   max_tokens: 2000
   concurrency: 3
 
