@@ -213,10 +213,18 @@ async def run_pure_fetch_realtime(
         pass
 
     regions = list(regions) if regions else list(MY_REGIONS)
-    type_plan: List[tuple[str, int]] = (
-        [(t, TYPE_QUOTA[t]) for t in types if t in TYPE_QUOTA]
-        if types else list(TYPE_QUOTA.items())
+    # pure_fetch_realtime targets 6 × 100 = 600 valid (CSV-persisted) rows
+    # per region, regardless of the per-type weights in TYPE_QUOTA (which the
+    # seeder still honours for its 100-per-region fill plan). Each of the 6
+    # property-type keys gets a flat quota of 100.
+    PURE_FETCH_QUOTA_PER_TYPE = 100
+    selected_types = (
+        [t for t in types if t in TYPE_QUOTA]
+        if types else list(TYPE_QUOTA.keys())
     )
+    type_plan: List[tuple[str, int]] = [
+        (t, PURE_FETCH_QUOTA_PER_TYPE) for t in selected_types
+    ]
     if not type_plan:
         raise ValueError(f"No valid types in {types!r}; valid keys: {list(TYPE_QUOTA)}")
 
